@@ -5,6 +5,7 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/common/Logging.hh"
 #include "common/CmdLineParser.hh"
+#include "common/GracefulExit.hh"
 #include "congestion_unaware/CongestionUnawareNetworkApi.hh"
 #include <astra-network-analytical/common/EventQueue.h>
 #include <astra-network-analytical/common/NetworkParser.h>
@@ -12,6 +13,7 @@ LICENSE file in the root directory of this source tree.
 #include <memory_backend/analytical/AnalyticalMemory.hh>
 #include <json/json.hpp>
 #include <unistd.h>
+#include <algorithm>
 #include <iostream>
 
 using namespace AstraSim;
@@ -216,13 +218,30 @@ int main(int argc, char* argv[]) {
     //     event_queue->proceed();
     // }
 
+    GracefulExit graceful_exit(systems.size());
+    const auto finished_system_count = [&systems]() {
+      return std::count_if(
+          systems.begin(), systems.end(), [](const Sys* system) {
+            return system->workload->is_finished;
+          });
+    };
+
     bool exit = false;
     while (!exit) {
+      if (graceful_exit.should_exit(finished_system_count())) {
+        exit = true;
+        break;
+      }
+
       if(!event_queue->finished()){
         event_queue->proceed();
       }
       else {
         event_queue->add_current_time();
+      }
+
+      if (graceful_exit.requested()) {
+        continue;
       }
 
       for (std::size_t idx = 0; idx < end_npu_ids.size(); ++idx) {
@@ -241,8 +260,9 @@ int main(int argc, char* argv[]) {
             continue;
           } 
           else if (new_filename == "exit") {  
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work and let every managed system drain before
+            // entering the terminal self-check.
+            graceful_exit.request();
             break;
           } 
           else if (new_filename == "done") {
@@ -257,8 +277,8 @@ int main(int argc, char* argv[]) {
         }
       }
       
-      if (exit) {
-        break;
+      if (graceful_exit.requested()) {
+        continue;
       }
 
       for (std::size_t idx = 0; idx < start_npu_ids.size(); ++idx) {
@@ -277,8 +297,9 @@ int main(int argc, char* argv[]) {
             continue;
           } 
           else if (new_filename == "exit") {  
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work and let every managed system drain before
+            // entering the terminal self-check.
+            graceful_exit.request();
             break;
           } 
           else if (new_filename == "done") {

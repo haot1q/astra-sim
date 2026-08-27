@@ -29,6 +29,15 @@ file(GLOB srcs_congestion_aware
         ${CMAKE_CURRENT_SOURCE_DIR}/congestion_aware/*.cc
 )
 
+if(BUILD_TESTING)
+    add_executable(AstraSim_GracefulExit_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/GracefulExitTest.cc)
+    target_include_directories(AstraSim_GracefulExit_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/)
+    add_test(NAME AstraSim_GracefulExit_Test
+            COMMAND AstraSim_GracefulExit_Test)
+endif()
+
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     add_executable(AstraSim_Analytical_Congestion_Unaware ${srcs_congestion_unaware} ${srcs_common})
