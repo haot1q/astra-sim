@@ -1,5 +1,6 @@
 #include "astra-sim/common/AstraNetworkAPI.hh"
 #include "astra-sim/system/Sys.hh"
+#include "astra-sim/system/MemoryTierConfig.hh"
 #include "extern/memory_backend/analytical/AnalyticalMemory.hh"
 #include <json/json.hpp>
 
@@ -26,25 +27,6 @@ using namespace Analytical;
 using namespace std;
 using namespace ns3;
 using json = nlohmann::json;
-
-static std::string save_json_to_tmp(const json& j, const std::string& name) {
-  const char* dir = "tmp_mem";
-  if (::mkdir(dir, 0755) == -1) {
-    if (errno != EEXIST) {
-      std::perror("mkdir tmp_mem");
-      std::exit(1);
-    }
-  }
-  std::string path = std::string(dir) + "/" + name + ".json";
-  std::ofstream ofs(path);
-  if (!ofs) {
-    std::cerr << "Unable to write tmp file: " << path << "\n";
-    std::exit(1);
-  }
-  ofs << j.dump(2);
-  return path;
-}
-
 
 /**
  * @class NS3BackendCompletionTracker
@@ -320,56 +302,17 @@ int main(int argc, char* argv[]) {
     // Setup network & System layer.
     vector<ASTRASimNetwork*> networks(num_npus, nullptr);
     vector<AstraSim::Sys*> systems(num_npus, nullptr);
-    json mem_json;
-    std::ifstream rm_ifs(memory_configuration);
-    rm_ifs >> mem_json;
-
     std::vector<std::unique_ptr<AnalyticalMemory>> memory_levels;
-
-    // Check if the configuration is for a single memory type
-    const bool is_single =
-      mem_json.is_object() &&
-      mem_json.contains("memory-type") &&
-      mem_json.contains("mem-latency") &&
-      mem_json.contains("mem-bw");
-    
-    if (is_single) {
-      std::cout << "Single Memory Configuration Detected" << std::endl;
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(memory_configuration));
-    } else {
-      // local memory
-      if (mem_json.contains("local_mem") && mem_json["local_mem"].is_object()) {
-        json j = mem_json["local_mem"];
-        j["memory-location"] = "LOCAL_MEMORY";
-        auto path = save_json_to_tmp(j, "local_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // remote memory
-      if (mem_json.contains("remote_mem") && mem_json["remote_mem"].is_object()) {
-        json j = mem_json["remote_mem"];
-        j["memory-location"] = "REMOTE_MEMORY";
-        auto path = save_json_to_tmp(j, "remote_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // cxl memory
-      if (mem_json.contains("cxl_mem") && mem_json["cxl_mem"].is_object()) {
-        json j = mem_json["cxl_mem"];
-        j["memory-location"] = "CXL_MEMORY";
-        auto path = save_json_to_tmp(j, "cxl_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      ::rmdir("tmp_mem");
-    }
-
-    auto memory_apis = std::vector<AstraMemoryAPI*>();
-    for (auto& mem_api : memory_levels) {
-      memory_apis.push_back(mem_api.get());
+    const auto memory_config = load_memory_tier_config(memory_configuration);
+    auto memory_tiers = std::vector<MemoryTierBinding>();
+    for (const auto& tier : memory_config.tiers) {
+      const auto path = write_temporary_memory_backend_config(
+          tier.backend_config);
+      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
+      std::remove(path.c_str());
+      memory_tiers.push_back(
+          {tier.tier_id, tier.tier_name, tier.num_devices,
+           memory_levels.back().get()});
     }
 
     NS3BackendCompletionTracker* completion_tracker = new NS3BackendCompletionTracker(num_npus);
@@ -378,7 +321,8 @@ int main(int argc, char* argv[]) {
         networks[npu_id] = new ASTRASimNetwork(npu_id, completion_tracker);
         systems[npu_id] = new AstraSim::Sys(
             npu_id, workload_configuration, comm_group_configuration,
-            system_configuration, memory_apis, networks[npu_id], logical_dims,
+            system_configuration, memory_tiers,
+            memory_config.manifest_digest, networks[npu_id], logical_dims,
             queues_per_dim, injection_scale, comm_scale, rendezvous_protocol);
     }
 

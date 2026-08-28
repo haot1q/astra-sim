@@ -29,6 +29,26 @@ file(GLOB srcs_congestion_aware
         ${CMAKE_CURRENT_SOURCE_DIR}/congestion_aware/*.cc
 )
 
+if(BUILD_TESTING)
+    add_executable(AstraSim_GracefulExit_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/GracefulExitTest.cc)
+    target_include_directories(AstraSim_GracefulExit_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/)
+    add_test(NAME AstraSim_GracefulExit_Test
+            COMMAND AstraSim_GracefulExit_Test)
+
+    add_executable(AstraSim_MemoryTierConfig_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/MemoryTierConfigTest.cc)
+    target_link_libraries(AstraSim_MemoryTierConfig_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_MemoryTierConfig_Test
+            COMMAND AstraSim_MemoryTierConfig_Test)
+
+    add_executable(AstraSim_MemoryTierRegistry_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/MemoryTierRegistryTest.cc)
+    target_link_libraries(AstraSim_MemoryTierRegistry_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_MemoryTierRegistry_Test
+            COMMAND AstraSim_MemoryTierRegistry_Test)
+endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     add_executable(AstraSim_Analytical_Congestion_Unaware ${srcs_congestion_unaware} ${srcs_common})

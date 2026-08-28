@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 
 #include <cstdlib>
 #include <iostream>
+#include <utility>
 
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/BaseStream.hh"
@@ -14,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/DataSet.hh"
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MemEventHandlerData.hh"
+#include "astra-sim/system/MemoryTierConfig.hh"
 #include "astra-sim/system/QueueLevels.hh"
 #include "astra-sim/system/RendezvousRecvData.hh"
 #include "astra-sim/system/RendezvousSendData.hh"
@@ -140,13 +142,16 @@ Sys::Sys(int id,
          string workload_configuration,
          string comm_group_configuration,
          string system_configuration,
-         std::vector<AstraMemoryAPI*> memory_apis,
+         std::vector<MemoryTierBinding> memory_tier_bindings,
+         std::string tier_manifest_digest,
          AstraNetworkAPI* comm_NI,
          vector<int> physical_dims,
          vector<int> queues_per_dim,
          double injection_scale,
          double comm_scale,
-         bool rendezvous_enabled) {
+         bool rendezvous_enabled)
+    : memory_tiers(memory_tier_bindings),
+      tier_manifest_digest(std::move(tier_manifest_digest)) {
     if ((id + 1) > this->all_sys.size()) {
         this->all_sys.resize(id + 1);
     }
@@ -161,31 +166,8 @@ Sys::Sys(int id,
     this->peak_perf = 0;
     this->roofline = nullptr;
 
-    for (auto mem : memory_apis) {
-        auto loc = mem->get_memory_location_type();
-        if (loc == MemoryLocationType::REMOTE_MEMORY) {
-            // std::cout << "Detected REMOTE_MEMORY" << std::endl;
-            this->remote_mem = mem;
-            this->remote_mem->set_sys(id, this);
-        }
-        else if (loc == MemoryLocationType::LOCAL_MEMORY) {
-            // std::cout << "Detected LOCAL_MEMORY" << std::endl;
-            this->local_mem = mem;
-            this->local_mem->set_sys(id, this);
-        }
-        else if (loc == MemoryLocationType::CXL_MEMORY) {
-            // std::cout << "Detected CXL_MEMORY" << std::endl;
-            this->cxl_mem = mem;
-            this->cxl_mem->set_sys(id, this);
-        }
-        else if (loc == MemoryLocationType::STORAGE_MEMORY) {
-            // currently do nothing
-            this->storage_mem = mem;
-        }
-        else {
-            std::cout << "location type " << (int)loc << std::endl;
-            sys_panic("Unsupported memory location type");
-        }
+    for (const auto& binding : memory_tier_bindings) {
+        binding.api->set_sys(id, this);
     }
     
     this->local_mem_bw = 0;
@@ -286,6 +268,16 @@ Sys::Sys(int id,
     this->dimension_to_break = 0;
 
     this->initialized = true;
+}
+
+AstraMemoryAPI* Sys::memory_api(
+    MemoryTierId tier_id, uint32_t device_id) const {
+    return memory_tiers.at(tier_id, device_id);
+}
+
+void Sys::validate_tier_manifest_digest(
+    const std::string& et_manifest_digest) const {
+    validate_et_manifest_digest(tier_manifest_digest, et_manifest_digest);
 }
 
 Sys::~Sys() {
