@@ -45,15 +45,26 @@ Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
         LoggerFactory::get_logger("workload")->critical(error_msg);
         exit(EXIT_FAILURE);
     }
-    this->et_feeder = new ETFeeder(workload_filename);
+    this->sys = sys;
+    this->et_feeder = load_et_feeder(workload_filename);
     this->comm_group = nullptr;
     this->hw_resource = new HardwareResource(1);
-    this->sys = sys;
     initialize_comm_group(comm_group_filename);
     this->is_finished = false;
     this->iteration = 0;
     this->filename = et_filename;
     this->is_sleep = false;
+}
+
+ETFeeder* Workload::load_et_feeder(const string& workload_filename) {
+    auto* feeder = new ETFeeder(workload_filename);
+    try {
+        sys->validate_tier_manifest_digest(feeder->tierManifestDigest());
+    } catch (...) {
+        delete feeder;
+        throw;
+    }
+    return feeder;
 }
 
 Workload::~Workload() {
@@ -217,28 +228,16 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
         wlhd->pim_channel_id = node->tensor_channel();
         wlhd->pim_runtime = node->runtime();
     }
-    switch (static_cast<MemoryLocationType>(node->tensor_loc())) {
-        case MemoryLocationType::LOCAL_MEMORY:
-            // local memory access
-            sys->local_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::REMOTE_MEMORY:
-            // remote memory access
-            sys->remote_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::CXL_MEMORY:
-            // CXL memory access
-            sys->cxl_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::STORAGE_MEMORY:
-            // storage memory access
-            sys->storage_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::INVALID_MEMORY:
-        default:
-            // invalid memory access
-            LoggerFactory::get_logger("workload")->critical("Invalid memory type");
-            exit(EXIT_FAILURE);
+    try {
+        sys->memory_api(node->tensor_loc(), node->tensor_device())
+            ->issue(node->tensor_size(), wlhd);
+    } catch (const std::out_of_range& error) {
+        LoggerFactory::get_logger("workload")->critical(
+            "Memory dispatch failed for workload node {}, tier_id {}, "
+            "device_id {}: {}",
+            node->id(), node->tensor_loc(), node->tensor_device(), error.what());
+        delete wlhd;
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -463,7 +462,7 @@ void Workload::call(EventType event, CallData* data) {
             // there exists new workload, change the ETFeeder
             if (this->et_feeder != nullptr)
                 delete this->et_feeder;
-            this->et_feeder = new ETFeeder(next_workload);
+            this->et_feeder = load_et_feeder(next_workload);
             iteration++;
             is_finished = false;
             // fire next iteration
@@ -504,7 +503,8 @@ void Workload::add_workload(const std::string& new_filename,
             // if the workload is finished, we can directly change the ETFeeder
             if (managed_sys->workload->et_feeder != nullptr)
                 delete managed_sys->workload->et_feeder;
-            managed_sys->workload->et_feeder = new ETFeeder(workload_filename);
+            managed_sys->workload->et_feeder =
+                managed_sys->workload->load_et_feeder(workload_filename);
             managed_sys->workload->iteration++;
             managed_sys->workload->is_finished = false;
             // fire next iteration
@@ -535,7 +535,7 @@ void Workload::add_workload(const std::string& new_filename,
     // there exists new workload, change the ETFeeder
     if (this->et_feeder != nullptr)
       delete this->et_feeder;
-    this->et_feeder = new ETFeeder(workload_filename);
+    this->et_feeder = load_et_feeder(workload_filename);
     iteration++;
     is_finished = false;
     // fire next iteration

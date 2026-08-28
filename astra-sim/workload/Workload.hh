@@ -44,6 +44,7 @@ class Workload : public Callable {
     void fire();
     void add_workload(const std::string& new_filename, const std::vector<Sys*>& systems);
     void sleep_workload(const std::vector<Sys*>& systems);
+    Chakra::ETFeeder* load_et_feeder(const std::string& workload_filename);
 
     // stats
     void report();

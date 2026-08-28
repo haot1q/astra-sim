@@ -11,8 +11,7 @@ LICENSE file in the root directory of this source tree.
 #include <astra-network-analytical/common/NetworkParser.h>
 #include <astra-network-analytical/congestion_unaware/Helper.h>
 #include <memory_backend/analytical/AnalyticalMemory.hh>
-#include <json/json.hpp>
-#include <unistd.h>
+#include "astra-sim/system/MemoryTierConfig.hh"
 #include <algorithm>
 #include <iostream>
 
@@ -23,27 +22,6 @@ using namespace AstraSimAnalyticalCongestionUnaware;
 using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
-using json = nlohmann::json;
-
-
-static std::string save_json_to_tmp(const json& j, const std::string& name) {
-  const char* dir = "tmp__mem";
-  if (::mkdir(dir, 0755) == -1) {
-    if (errno != EEXIST) {
-      std::perror("mkdir tmp_mem");
-      std::exit(1);
-    }
-  }
-  std::string path = std::string(dir) + "/" + name + ".json";
-  std::ofstream ofs(path);
-  if (!ofs) {
-    std::cerr << "Unable to write tmp file: " << path << "\n";
-    std::exit(1);
-  }
-  ofs << j.dump(2);
-  return path;
-}
-
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     auto cmd_line_parser = CmdLineParser(argv[0]);
@@ -103,56 +81,17 @@ int main(int argc, char* argv[]) {
     auto network_apis =
         std::vector<std::unique_ptr<CongestionUnawareNetworkApi>>();
     
-    json mem_json;
-    std::ifstream rm_ifs(memory_configuration);
-    rm_ifs >> mem_json;
-
     std::vector<std::unique_ptr<AnalyticalMemory>> memory_levels;
-
-    // Check if the configuration is for a single memory type
-    const bool is_single =
-      mem_json.is_object() &&
-      mem_json.contains("memory-type") &&
-      mem_json.contains("mem-latency") &&
-      mem_json.contains("mem-bw");
-    
-    if (is_single) {
-      std::cout << "Single Memory Configuration Detected" << std::endl;
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(memory_configuration));
-    } else {
-      // local memory
-      if (mem_json.contains("local_mem") && mem_json["local_mem"].is_object()) {
-        json j = mem_json["local_mem"];
-        j["memory-location"] = "LOCAL_MEMORY";
-        auto path = save_json_to_tmp(j, "local_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // remote memory
-      if (mem_json.contains("remote_mem") && mem_json["remote_mem"].is_object()) {
-        json j = mem_json["remote_mem"];
-        j["memory-location"] = "REMOTE_MEMORY";
-        auto path = save_json_to_tmp(j, "remote_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // cxl memory
-      if (mem_json.contains("cxl_mem") && mem_json["cxl_mem"].is_object()) {
-        json j = mem_json["cxl_mem"];
-        j["memory-location"] = "CXL_MEMORY";
-        auto path = save_json_to_tmp(j, "cxl_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      ::rmdir("tmp_mem");
-    }
-
-    auto memory_apis = std::vector<AstraMemoryAPI*>();
-    for (auto& mem_api : memory_levels) {
-      memory_apis.push_back(mem_api.get());
+    const auto memory_config = load_memory_tier_config(memory_configuration);
+    auto memory_tiers = std::vector<MemoryTierBinding>();
+    for (const auto& tier : memory_config.tiers) {
+      const auto path = write_temporary_memory_backend_config(
+          tier.backend_config);
+      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
+      std::remove(path.c_str());
+      memory_tiers.push_back(
+          {tier.tier_id, tier.tier_name, tier.num_devices,
+           memory_levels.back().get()});
     }
 
     auto systems = std::vector<Sys*>();
@@ -167,7 +106,8 @@ int main(int argc, char* argv[]) {
         auto network_api = std::make_unique<CongestionUnawareNetworkApi>(i);
         auto* const system =
             new Sys(i, workload_configuration, comm_group_configuration,
-                    system_configuration, memory_apis, network_api.get(),
+                    system_configuration, memory_tiers,
+                    memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
                     comm_scale, rendezvous_protocol);
 
