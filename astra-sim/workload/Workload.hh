@@ -7,9 +7,10 @@ LICENSE file in the root directory of this source tree.
 #define __WORKLOAD_HH__
 
 #include <memory>
+#include <optional>
+#include <queue>
 #include <string>
 #include <unordered_map>
-#include <queue>
 
 #include "astra-sim/system/Callable.hh"
 #include "astra-sim/system/CommunicatorGroup.hh"
@@ -41,12 +42,19 @@ class Workload : public Callable {
     void issue_replay(std::shared_ptr<Chakra::ETFeederNode> node);
     // void issue_remote_mem(std::shared_ptr<Chakra::ETFeederNode> node); integrated into issue_mem
     void issue_mem(std::shared_ptr<Chakra::ETFeederNode> node);
+    void issue_memory_movement(std::shared_ptr<Chakra::ETFeederNode> node);
+    void complete_memory_movement(uint64_t node_id);
+    std::optional<uint64_t> movement_exposed_to_dependent_ns(
+        uint64_t node_id,
+        uint64_t ready_ns,
+        uint64_t finish_ns);
     void issue_comp(std::shared_ptr<Chakra::ETFeederNode> node);
     void issue_comm(std::shared_ptr<Chakra::ETFeederNode> node);
     void skip_invalid(std::shared_ptr<Chakra::ETFeederNode> node);
     void call(EventType event, CallData* data);
     void fire();
-    void add_workload(const std::string& new_filename, const std::vector<Sys*>& systems);
+    void add_workload(const std::string& new_filename,
+                      const std::vector<Sys*>& systems);
     void sleep_workload(const std::vector<Sys*>& systems);
     Chakra::ETFeeder* load_et_feeder(const std::string& workload_filename);
 
@@ -65,6 +73,12 @@ class Workload : public Callable {
 
     bool is_sleep;
     std::queue<std::string> pending_workloads;
+
+  private:
+    void record_parent_completion(
+        const std::shared_ptr<Chakra::ETFeederNode>& node);
+    void reset_iteration_tracking();
+    std::unordered_map<uint64_t, uint64_t> latest_parent_completion_ns_;
 };
 
 }  // namespace AstraSim

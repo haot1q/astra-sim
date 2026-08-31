@@ -16,6 +16,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MemEventHandlerData.hh"
 #include "astra-sim/system/MemoryTierConfig.hh"
+#include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include "astra-sim/system/QueueLevels.hh"
 #include "astra-sim/system/RendezvousRecvData.hh"
 #include "astra-sim/system/RendezvousSendData.hh"
@@ -169,7 +170,7 @@ Sys::Sys(int id,
     for (const auto& binding : memory_tier_bindings) {
         binding.api->set_sys(id, this);
     }
-    
+
     this->local_mem_bw = 0;
 
     this->memBus = nullptr;
@@ -255,6 +256,7 @@ Sys::Sys(int id,
     memBus = new MemBus("NPU", "MA", this, inp_L, inp_o, inp_g, inp_G,
                         model_shared_bus, communication_delay, true);
 
+    memory_movement_executor = std::make_unique<MemoryMovementExecutor>(this);
     workload =
         new Workload(this, workload_configuration, comm_group_configuration);
 
@@ -278,6 +280,11 @@ AstraMemoryAPI* Sys::memory_api(
 void Sys::validate_tier_manifest_digest(
     const std::string& et_manifest_digest) const {
     validate_et_manifest_digest(tier_manifest_digest, et_manifest_digest);
+}
+
+bool Sys::memory_movement_drained() const {
+    return memory_movement_executor == nullptr ||
+        memory_movement_executor->drained();
 }
 
 Sys::~Sys() {

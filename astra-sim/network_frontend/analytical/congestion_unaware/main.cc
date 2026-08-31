@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
     // Create ASTRA-sim related resources
     auto network_apis =
         std::vector<std::unique_ptr<CongestionUnawareNetworkApi>>();
-    
+
     std::vector<std::unique_ptr<AnalyticalMemory>> memory_levels;
     const auto memory_config = load_memory_tier_config(memory_configuration);
     auto memory_tiers = std::vector<MemoryTierBinding>();
@@ -231,7 +231,15 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
+    const auto all_systems_drained = [&systems]() {
+      return std::all_of(
+          systems.begin(), systems.end(), [](const Sys* system) {
+            return system->workload->is_finished &&
+                system->memory_movement_drained();
+          });
+    };
     bool exit = false;
+    bool exit_requested = false;
     while (!exit) {
       bool asked_any = false;
       if(!event_queue->finished()){
@@ -242,6 +250,11 @@ int main(int argc, char* argv[]) {
         // Nothing is in flight, so no report can arrive to lift the
         // suppression; the 1 ms quantum is the only thing that moves.
         clear_suppression();
+      }
+
+      if (exit_requested) {
+        exit = all_systems_drained();
+        continue;
       }
 
       for (std::size_t idx = 0; idx < end_npu_ids.size(); ++idx) {
@@ -307,8 +320,8 @@ int main(int argc, char* argv[]) {
           pass_gen[npu_id] = -1;
 
           if (new_filename == "exit") {
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work, but drain run-scoped DMA before exit.
+            exit_requested = true;
             break;
           }
           else if (new_filename == "done") {
@@ -322,9 +335,9 @@ int main(int argc, char* argv[]) {
           }
         }
       }
-      
-      if (exit) {
-        break;
+
+      if (exit_requested) {
+        continue;
       }
 
       for (std::size_t idx = 0; idx < start_npu_ids.size(); ++idx) {
@@ -390,8 +403,8 @@ int main(int argc, char* argv[]) {
           pass_gen[npu_id] = -1;
 
           if (new_filename == "exit") {
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work, but drain run-scoped DMA before exit.
+            exit_requested = true;
             break;
           }
           else if (new_filename == "done") {
@@ -422,7 +435,8 @@ int main(int argc, char* argv[]) {
     bool done = true;
     for (int npu_id = 0; npu_id < npus_count; npu_id++) {
 
-      if (systems[npu_id]->workload->is_finished == false){
+      if (!systems[npu_id]->workload->is_finished ||
+          !systems[npu_id]->memory_movement_drained()) {
         cout << "sys[" << npu_id << "] " << endl;
         systems[npu_id]->workload->et_feeder->printGraph();
         done = false;

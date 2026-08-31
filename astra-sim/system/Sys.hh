@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 #define __SYSTEM_HH__
 
 #include <chrono>
+#include <memory>
 
 #include "astra-sim/common/AstraNetworkAPI.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
@@ -30,6 +31,7 @@ class Workload;
 class LogicalTopology;
 class BasicLogicalTopology;
 class OfflineGreedy;
+class MemoryMovementExecutor;
 
 class Sys : public Callable {
   public:
@@ -95,6 +97,7 @@ class Sys : public Callable {
         MemoryTierId tier_id, uint32_t device_id) const;
     void validate_tier_manifest_digest(
         const std::string& et_manifest_digest) const;
+    bool memory_movement_drained() const;
     //---------------------------------------------------------------------------
 
     // Simulation Loop
@@ -266,6 +269,7 @@ class Sys : public Callable {
     double local_mem_bw;
     MemoryTierRegistry memory_tiers;
     std::string tier_manifest_digest;
+    std::unique_ptr<MemoryMovementExecutor> memory_movement_executor;
 
     // memory bus
     MemBus* memBus;
