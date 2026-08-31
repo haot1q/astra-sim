@@ -48,6 +48,18 @@ if(BUILD_TESTING)
     target_link_libraries(AstraSim_MemoryTierRegistry_Test PRIVATE AstraSim)
     add_test(NAME AstraSim_MemoryTierRegistry_Test
             COMMAND AstraSim_MemoryTierRegistry_Test)
+
+    add_executable(AstraSim_BandwidthResource_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/BandwidthResourceTest.cc)
+    target_link_libraries(AstraSim_BandwidthResource_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_BandwidthResource_Test
+            COMMAND AstraSim_BandwidthResource_Test)
+
+    add_executable(AstraSim_MemoryOperation_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/MemoryOperationTest.cc)
+    target_link_libraries(AstraSim_MemoryOperation_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_MemoryOperation_Test
+            COMMAND AstraSim_MemoryOperation_Test)
 endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")

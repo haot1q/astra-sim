@@ -13,11 +13,21 @@ namespace AstraSim {
 class Sys;
 class WorkloadLayerHandlerData;
 
+enum class MemoryOperation : uint8_t {
+  Read = 1,
+  Write = 2,
+};
+
+struct MemoryRequest {
+  uint64_t bytes;
+  MemoryOperation operation;
+};
+
 class AstraMemoryAPI {
   public:
     virtual ~AstraMemoryAPI() = default;
     virtual void set_sys(int id, Sys* sys) = 0;
-    virtual void issue(uint64_t tensor_size,
+    virtual void issue(const MemoryRequest& request,
                        WorkloadLayerHandlerData* wlhd) = 0;
 };
 

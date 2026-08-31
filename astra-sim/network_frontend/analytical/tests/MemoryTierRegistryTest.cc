@@ -12,7 +12,8 @@ namespace {
 class MockMemory : public AstraSim::AstraMemoryAPI {
   public:
     void set_sys(int, AstraSim::Sys*) override {}
-    void issue(uint64_t, AstraSim::WorkloadLayerHandlerData*) override {}
+    void issue(const AstraSim::MemoryRequest&,
+               AstraSim::WorkloadLayerHandlerData*) override {}
     AstraSim::MemoryLocationType get_memory_location_type() const override {
         return AstraSim::MemoryLocationType::INVALID_MEMORY;
     }

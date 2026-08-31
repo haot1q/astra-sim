@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 #define __WORKLOAD_LAYER_HANDLER_DATA_HH__
 
 #include "astra-sim/common/AstraNetworkAPI.hh"
+#include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/BasicEventHandlerData.hh"
 
 namespace AstraSim {
@@ -19,6 +20,7 @@ class WorkloadLayerHandlerData : public BasicEventHandlerData, public MetaData {
     Workload* workload;
     uint64_t node_id;
     uint32_t device_id;
+    MemoryOperation memory_operation;
     bool pim_enabled;
     uint32_t pim_channel_id;
     uint64_t pim_runtime;

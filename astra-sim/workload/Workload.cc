@@ -27,6 +27,18 @@ using AstraSim::MemoryLocationType;
 typedef ChakraProtoMsg::NodeType ChakraNodeType;
 typedef ChakraProtoMsg::CollectiveCommType ChakraCollectiveCommType;
 
+MemoryOperation AstraSim::memory_operation_for_node_type(
+    ChakraProtoMsg::NodeType node_type) {
+    if (node_type == ChakraNodeType::MEM_LOAD_NODE ||
+        node_type == ChakraNodeType::PIM_COMP_NODE) {
+        return MemoryOperation::Read;
+    }
+    if (node_type == ChakraNodeType::MEM_STORE_NODE) {
+        return MemoryOperation::Write;
+    }
+    throw invalid_argument("node type is not a supported memory operation");
+}
+
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     string workload_filename = et_filename + "." + to_string(sys->id) + ".et";
     // Check if workload filename exists
@@ -228,14 +240,26 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
         wlhd->pim_channel_id = node->tensor_channel();
         wlhd->pim_runtime = node->runtime();
     }
+    MemoryOperation operation;
+    try {
+        operation = memory_operation_for_node_type(node->type());
+    } catch (const invalid_argument& error) {
+        LoggerFactory::get_logger("workload")->critical(
+            "Unsupported memory node type {} for workload node {}: {}",
+            static_cast<uint64_t>(node->type()), node->id(), error.what());
+        delete wlhd;
+        exit(EXIT_FAILURE);
+    }
     try {
         sys->memory_api(node->tensor_loc(), node->tensor_device())
-            ->issue(node->tensor_size(), wlhd);
-    } catch (const std::out_of_range& error) {
+            ->issue({node->tensor_size(), operation}, wlhd);
+    } catch (const std::exception& error) {
         LoggerFactory::get_logger("workload")->critical(
             "Memory dispatch failed for workload node {}, tier_id {}, "
-            "device_id {}: {}",
-            node->id(), node->tensor_loc(), node->tensor_device(), error.what());
+            "device_id {}, operation {}: {}",
+            node->id(), node->tensor_loc(), node->tensor_device(),
+            operation == MemoryOperation::Read ? "read" : "write",
+            error.what());
         delete wlhd;
         exit(EXIT_FAILURE);
     }
