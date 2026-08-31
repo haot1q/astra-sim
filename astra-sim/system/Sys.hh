@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 #define __SYSTEM_HH__
 
 #include <chrono>
+#include <memory>
 
 #include "astra-sim/common/AstraNetworkAPI.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
@@ -14,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CollectivePhase.hh"
 #include "astra-sim/system/CommunicatorGroup.hh"
 #include "astra-sim/system/MemBus.hh"
+#include "astra-sim/system/MemoryTierRegistry.hh"
 #include "astra-sim/system/Roofline.hh"
 #include "astra-sim/system/UsageTracker.hh"
 #include "astra-sim/system/topology/RingTopology.hh"
@@ -29,6 +31,7 @@ class Workload;
 class LogicalTopology;
 class BasicLogicalTopology;
 class OfflineGreedy;
+class MemoryMovementExecutor;
 
 class Sys : public Callable {
   public:
@@ -66,7 +69,8 @@ class Sys : public Callable {
         std::string workload_configuration,
         std::string comm_group_configuration,
         std::string system_configuration,
-        std::vector<AstraMemoryAPI*> memory_apis,
+        std::vector<MemoryTierBinding> memory_tiers,
+        std::string tier_manifest_digest,
         AstraNetworkAPI* comm_NI,
         std::vector<int> physical_dims,
         std::vector<int> queues_per_dim,
@@ -89,6 +93,11 @@ class Sys : public Callable {
     // ---------------------------------------------------------
     static Tick boostedTick();
     static void sys_panic(std::string msg);
+    AstraMemoryAPI* memory_api(
+        MemoryTierId tier_id, uint32_t device_id) const;
+    void validate_tier_manifest_digest(
+        const std::string& et_manifest_digest) const;
+    bool memory_movement_drained() const;
     //---------------------------------------------------------------------------
 
     // Simulation Loop
@@ -258,10 +267,9 @@ class Sys : public Callable {
 
     // memory
     double local_mem_bw;
-    AstraMemoryAPI* local_mem;
-    AstraMemoryAPI* remote_mem;
-    AstraMemoryAPI* cxl_mem;
-    AstraMemoryAPI* storage_mem;
+    MemoryTierRegistry memory_tiers;
+    std::string tier_manifest_digest;
+    std::unique_ptr<MemoryMovementExecutor> memory_movement_executor;
 
     // memory bus
     MemBus* memBus;

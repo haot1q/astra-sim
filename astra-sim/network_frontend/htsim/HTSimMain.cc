@@ -69,7 +69,8 @@ int main(int argc, char* argv[]) {
         auto network_api = std::make_unique<HTSimNetworkApi>(i);
         auto* const system =
             new Sys(i, workload_configuration, comm_group_configuration, system_configuration,
-                    memory_api.get(), network_api.get(), npus_count_per_dim, queues_per_dim,
+                    legacy_memory_tier_bindings({memory_api.get()}), "",
+                    network_api.get(), npus_count_per_dim, queues_per_dim,
                     injection_scale, comm_scale, rendezvous_protocol);
 
         // push back network and system

@@ -10,8 +10,7 @@ LICENSE file in the root directory of this source tree.
 #include <astra-network-analytical/common/NetworkParser.h>
 #include <astra-network-analytical/congestion_unaware/Helper.h>
 #include <memory_backend/analytical/AnalyticalMemory.hh>
-#include <json/json.hpp>
-#include <unistd.h>
+#include "astra-sim/system/MemoryTierConfig.hh"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -24,27 +23,6 @@ using namespace AstraSimAnalyticalCongestionUnaware;
 using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
-using json = nlohmann::json;
-
-
-static std::string save_json_to_tmp(const json& j, const std::string& name) {
-  const char* dir = "tmp__mem";
-  if (::mkdir(dir, 0755) == -1) {
-    if (errno != EEXIST) {
-      std::perror("mkdir tmp_mem");
-      std::exit(1);
-    }
-  }
-  std::string path = std::string(dir) + "/" + name + ".json";
-  std::ofstream ofs(path);
-  if (!ofs) {
-    std::cerr << "Unable to write tmp file: " << path << "\n";
-    std::exit(1);
-  }
-  ofs << j.dump(2);
-  return path;
-}
-
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     auto cmd_line_parser = CmdLineParser(argv[0]);
@@ -103,57 +81,18 @@ int main(int argc, char* argv[]) {
     // Create ASTRA-sim related resources
     auto network_apis =
         std::vector<std::unique_ptr<CongestionUnawareNetworkApi>>();
-    
-    json mem_json;
-    std::ifstream rm_ifs(memory_configuration);
-    rm_ifs >> mem_json;
 
     std::vector<std::unique_ptr<AnalyticalMemory>> memory_levels;
-
-    // Check if the configuration is for a single memory type
-    const bool is_single =
-      mem_json.is_object() &&
-      mem_json.contains("memory-type") &&
-      mem_json.contains("mem-latency") &&
-      mem_json.contains("mem-bw");
-    
-    if (is_single) {
-      std::cout << "Single Memory Configuration Detected" << std::endl;
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(memory_configuration));
-    } else {
-      // local memory
-      if (mem_json.contains("local_mem") && mem_json["local_mem"].is_object()) {
-        json j = mem_json["local_mem"];
-        j["memory-location"] = "LOCAL_MEMORY";
-        auto path = save_json_to_tmp(j, "local_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // remote memory
-      if (mem_json.contains("remote_mem") && mem_json["remote_mem"].is_object()) {
-        json j = mem_json["remote_mem"];
-        j["memory-location"] = "REMOTE_MEMORY";
-        auto path = save_json_to_tmp(j, "remote_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      // cxl memory
-      if (mem_json.contains("cxl_mem") && mem_json["cxl_mem"].is_object()) {
-        json j = mem_json["cxl_mem"];
-        j["memory-location"] = "CXL_MEMORY";
-        auto path = save_json_to_tmp(j, "cxl_mem");
-        memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-        std::remove(path.c_str()); 
-      }
-
-      ::rmdir("tmp_mem");
-    }
-
-    auto memory_apis = std::vector<AstraMemoryAPI*>();
-    for (auto& mem_api : memory_levels) {
-      memory_apis.push_back(mem_api.get());
+    const auto memory_config = load_memory_tier_config(memory_configuration);
+    auto memory_tiers = std::vector<MemoryTierBinding>();
+    for (const auto& tier : memory_config.tiers) {
+      const auto path = write_temporary_memory_backend_config(
+          tier.backend_config);
+      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
+      std::remove(path.c_str());
+      memory_tiers.push_back(
+          {tier.tier_id, tier.tier_name, tier.num_devices,
+           memory_levels.back().get()});
     }
 
     auto systems = std::vector<Sys*>();
@@ -168,7 +107,8 @@ int main(int argc, char* argv[]) {
         auto network_api = std::make_unique<CongestionUnawareNetworkApi>(i);
         auto* const system =
             new Sys(i, workload_configuration, comm_group_configuration,
-                    system_configuration, memory_apis, network_api.get(),
+                    system_configuration, memory_tiers,
+                    memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
                     comm_scale, rendezvous_protocol);
 
@@ -291,7 +231,15 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
+    const auto all_systems_drained = [&systems]() {
+      return std::all_of(
+          systems.begin(), systems.end(), [](const Sys* system) {
+            return system->workload->is_finished &&
+                system->memory_movement_drained();
+          });
+    };
     bool exit = false;
+    bool exit_requested = false;
     while (!exit) {
       bool asked_any = false;
       if(!event_queue->finished()){
@@ -302,6 +250,11 @@ int main(int argc, char* argv[]) {
         // Nothing is in flight, so no report can arrive to lift the
         // suppression; the 1 ms quantum is the only thing that moves.
         clear_suppression();
+      }
+
+      if (exit_requested) {
+        exit = all_systems_drained();
+        continue;
       }
 
       for (std::size_t idx = 0; idx < end_npu_ids.size(); ++idx) {
@@ -367,8 +320,8 @@ int main(int argc, char* argv[]) {
           pass_gen[npu_id] = -1;
 
           if (new_filename == "exit") {
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work, but drain run-scoped DMA before exit.
+            exit_requested = true;
             break;
           }
           else if (new_filename == "done") {
@@ -382,9 +335,9 @@ int main(int argc, char* argv[]) {
           }
         }
       }
-      
-      if (exit) {
-        break;
+
+      if (exit_requested) {
+        continue;
       }
 
       for (std::size_t idx = 0; idx < start_npu_ids.size(); ++idx) {
@@ -450,8 +403,8 @@ int main(int argc, char* argv[]) {
           pass_gen[npu_id] = -1;
 
           if (new_filename == "exit") {
-            // Terminate the entire simulator
-            exit = true;
+            // Stop accepting work, but drain run-scoped DMA before exit.
+            exit_requested = true;
             break;
           }
           else if (new_filename == "done") {
@@ -482,7 +435,8 @@ int main(int argc, char* argv[]) {
     bool done = true;
     for (int npu_id = 0; npu_id < npus_count; npu_id++) {
 
-      if (systems[npu_id]->workload->is_finished == false){
+      if (!systems[npu_id]->workload->is_finished ||
+          !systems[npu_id]->memory_movement_drained()) {
         cout << "sys[" << npu_id << "] " << endl;
         systems[npu_id]->workload->et_feeder->printGraph();
         done = false;

@@ -12,8 +12,10 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/SendPacketEventHandlerData.hh"
 #include "astra-sim/system/WorkloadLayerHandlerData.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
+#include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include <json/json.hpp>
 
+#include <algorithm>
 #include <iostream>
 #include <stdlib.h>
 #include <unistd.h>
@@ -22,10 +24,22 @@ using namespace std;
 using namespace AstraSim;
 using namespace Chakra;
 using json = nlohmann::json;
-using AstraSim::MemoryLocationType; 
+using AstraSim::MemoryLocationType;
 
 typedef ChakraProtoMsg::NodeType ChakraNodeType;
 typedef ChakraProtoMsg::CollectiveCommType ChakraCollectiveCommType;
+
+MemoryOperation AstraSim::memory_operation_for_node_type(
+    ChakraProtoMsg::NodeType node_type) {
+    if (node_type == ChakraNodeType::MEM_LOAD_NODE ||
+        node_type == ChakraNodeType::PIM_COMP_NODE) {
+        return MemoryOperation::Read;
+    }
+    if (node_type == ChakraNodeType::MEM_STORE_NODE) {
+        return MemoryOperation::Write;
+    }
+    throw invalid_argument("node type is not a supported memory operation");
+}
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     string workload_filename = et_filename + "." + to_string(sys->id) + ".et";
@@ -45,15 +59,26 @@ Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
         LoggerFactory::get_logger("workload")->critical(error_msg);
         exit(EXIT_FAILURE);
     }
-    this->et_feeder = new ETFeeder(workload_filename);
+    this->sys = sys;
+    this->et_feeder = load_et_feeder(workload_filename);
     this->comm_group = nullptr;
     this->hw_resource = new HardwareResource(1);
-    this->sys = sys;
     initialize_comm_group(comm_group_filename);
     this->is_finished = false;
     this->iteration = 0;
     this->filename = et_filename;
     this->is_sleep = false;
+}
+
+ETFeeder* Workload::load_et_feeder(const string& workload_filename) {
+    auto* feeder = new ETFeeder(workload_filename);
+    try {
+        sys->validate_tier_manifest_digest(feeder->tierManifestDigest());
+    } catch (...) {
+        delete feeder;
+        throw;
+    }
+    return feeder;
 }
 
 Workload::~Workload() {
@@ -118,10 +143,15 @@ void Workload::issue_dep_free_nodes() {
         et_feeder->pushBackIssuableNode(node->id());
         push_back_queue.pop();
     }
+    sys->memory_movement_executor->dispatch();
 }
 
 void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
     auto logger = LoggerFactory::get_logger("workload");
+    if (sys->memory_movement_executor->is_movement_node(node)) {
+        issue_memory_movement(node);
+        return;
+    }
     if (sys->replay_only) {
         hw_resource->occupy(node);
         issue_replay(node);
@@ -172,6 +202,69 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
     }
 }
 
+void Workload::issue_memory_movement(
+    shared_ptr<Chakra::ETFeederNode> node) {
+    try {
+        const bool foreground =
+            sys->memory_movement_executor->submit(node, this);
+        if (!foreground) {
+            et_feeder->freeChildrenNodes(node->id());
+            et_feeder->removeNode(node->id());
+        }
+    } catch (const std::exception& error) {
+        LoggerFactory::get_logger("workload")->critical(
+            "Memory movement dispatch failed for node {}: {}",
+            node->id(), error.what());
+        exit(EXIT_FAILURE);
+    }
+}
+
+void Workload::complete_memory_movement(uint64_t node_id) {
+    auto* data = new WorkloadLayerHandlerData;
+    data->node_id = node_id;
+    call(EventType::General, data);
+}
+
+optional<uint64_t> Workload::movement_exposed_to_dependent_ns(
+    uint64_t node_id,
+    uint64_t ready_ns,
+    uint64_t finish_ns) {
+    const auto movement = et_feeder->lookupNode(node_id);
+    bool has_compute_consumer = false;
+    uint64_t maximum_exposure_ns = 0;
+    for (const auto& child : movement->getChildren()) {
+        if (child->type() != ChakraNodeType::COMP_NODE || child->is_cpu_op()) {
+            continue;
+        }
+        has_compute_consumer = true;
+        uint64_t baseline_ns = ready_ns;
+        const auto previous = latest_parent_completion_ns_.find(child->id());
+        if (previous != latest_parent_completion_ns_.end()) {
+            baseline_ns = max(baseline_ns, previous->second);
+        }
+        if (finish_ns < baseline_ns) {
+            throw logic_error("movement exposure baseline exceeds finish time");
+        }
+        maximum_exposure_ns =
+            max(maximum_exposure_ns, finish_ns - baseline_ns);
+    }
+    return has_compute_consumer ? optional<uint64_t>(maximum_exposure_ns)
+                                : nullopt;
+}
+
+void Workload::record_parent_completion(
+    const shared_ptr<Chakra::ETFeederNode>& node) {
+    const uint64_t completion_ns = static_cast<uint64_t>(Sys::boostedTick());
+    for (const auto& child : node->getChildren()) {
+        auto& latest = latest_parent_completion_ns_[child->id()];
+        latest = max(latest, completion_ns);
+    }
+}
+
+void Workload::reset_iteration_tracking() {
+    latest_parent_completion_ns_.clear();
+}
+
 void Workload::issue_replay(shared_ptr<Chakra::ETFeederNode> node) {
     WorkloadLayerHandlerData* wlhd = new WorkloadLayerHandlerData;
     wlhd->node_id = node->id();
@@ -190,7 +283,7 @@ void Workload::issue_replay(shared_ptr<Chakra::ETFeederNode> node) {
     sys->register_event(this, EventType::General, wlhd, runtime);
 }
 
-/* 
+/*
     Now the node only stores one tensor_size for MEM_LOAD/STORE
     Can get tensor size using
     - node->tensor_size()
@@ -199,9 +292,9 @@ void Workload::issue_replay(shared_ptr<Chakra::ETFeederNode> node) {
     - node->name().find("INPUT") != string::npos
     - node->name().find("OUTPUT") != string::npos
     - node->name().find("WEIGHT") != string::npos
-    
+
     For the tensor location use tensor_loc()
-    - node->tensor_loc() 
+    - node->tensor_loc()
     INVALID_MEMORY = 0, LOCAL_MEMORY = 1, REMOTE_MEMORY = 2, CXL_MEMORY = 3 STORAGE_MEMORY = 4
 */
 void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
@@ -217,33 +310,36 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
         wlhd->pim_channel_id = node->tensor_channel();
         wlhd->pim_runtime = node->runtime();
     }
-    switch (static_cast<MemoryLocationType>(node->tensor_loc())) {
-        case MemoryLocationType::LOCAL_MEMORY:
-            // local memory access
-            sys->local_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::REMOTE_MEMORY:
-            // remote memory access
-            sys->remote_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::CXL_MEMORY:
-            // CXL memory access
-            sys->cxl_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::STORAGE_MEMORY:
-            // storage memory access
-            sys->storage_mem->issue(node->tensor_size(), wlhd);
-            break;
-        case MemoryLocationType::INVALID_MEMORY:
-        default:
-            // invalid memory access
-            LoggerFactory::get_logger("workload")->critical("Invalid memory type");
-            exit(EXIT_FAILURE);
+    MemoryOperation operation;
+    try {
+        operation = memory_operation_for_node_type(node->type());
+    } catch (const invalid_argument& error) {
+        LoggerFactory::get_logger("workload")->critical(
+            "Unsupported memory node type {} for workload node {}: {}",
+            static_cast<uint64_t>(node->type()), node->id(), error.what());
+        delete wlhd;
+        exit(EXIT_FAILURE);
+    }
+    try {
+        sys->memory_api(node->tensor_loc(), node->tensor_device())
+            ->issue({node->tensor_size(), operation}, wlhd);
+    } catch (const std::exception& error) {
+        LoggerFactory::get_logger("workload")->critical(
+            "Memory dispatch failed for workload node {}, tier_id {}, "
+            "device_id {}, operation {}: {}",
+            node->id(), node->tensor_loc(), node->tensor_device(),
+            operation == MemoryOperation::Read ? "read" : "write",
+            error.what());
+        delete wlhd;
+        exit(EXIT_FAILURE);
     }
 }
 
 void Workload::issue_comp(shared_ptr<Chakra::ETFeederNode> node) {
     hw_resource->occupy(node);
+    if (!node->is_cpu_op()) {
+        sys->memory_movement_executor->record_compute_start(node->id());
+    }
 
     if (sys->roofline_enabled) {
         WorkloadLayerHandlerData* wlhd = new WorkloadLayerHandlerData;
@@ -294,10 +390,10 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
     } else {
         // involved_dim does not exist in ETFeeder.
         // Assume involved_dim = [1,1,1,1,1] which we could simulate 5-Dimension.
-	// Could use Process Group to build involved_dim later. 
+	// Could use Process Group to build involved_dim later.
 	// Once process group is implemented, you should get
         // that with node->pg_name()
-	
+
 	for(int i = 0; i < 4; i++)
             involved_dim.push_back(true);
     }
@@ -390,6 +486,7 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
 }
 
 void Workload::skip_invalid(shared_ptr<Chakra::ETFeederNode> node) {
+    record_parent_completion(node);
     et_feeder->freeChildrenNodes(node->id());
     et_feeder->removeNode(node->id());
 }
@@ -415,10 +512,11 @@ void Workload::call(EventType event, CallData* data) {
 
         hw_resource->release(node);
 
+        record_parent_completion(node);
         et_feeder->freeChildrenNodes(node_id);
 
         issue_dep_free_nodes();
-      
+
         // The Dataset class provides statistics that should be used later to dump
         // more statistics in the workload layer
         delete collective_comm_wrapper_map[int_data->data];
@@ -432,6 +530,12 @@ void Workload::call(EventType event, CallData* data) {
             WorkloadLayerHandlerData* wlhd = (WorkloadLayerHandlerData*)data;
             shared_ptr<Chakra::ETFeederNode> node =
                 et_feeder->lookupNode(wlhd->node_id);
+
+            if (node->type() == ChakraNodeType::COMP_NODE &&
+                !node->is_cpu_op()) {
+                sys->memory_movement_executor->record_compute_finish(node->id());
+            }
+            record_parent_completion(node);
 
             if (sys->trace_enabled) {
                 LoggerFactory::get_logger("workload")
@@ -463,7 +567,8 @@ void Workload::call(EventType event, CallData* data) {
             // there exists new workload, change the ETFeeder
             if (this->et_feeder != nullptr)
                 delete this->et_feeder;
-            this->et_feeder = new ETFeeder(next_workload);
+            this->et_feeder = load_et_feeder(next_workload);
+            reset_iteration_tracking();
             iteration++;
             is_finished = false;
             // fire next iteration
@@ -504,7 +609,9 @@ void Workload::add_workload(const std::string& new_filename,
             // if the workload is finished, we can directly change the ETFeeder
             if (managed_sys->workload->et_feeder != nullptr)
                 delete managed_sys->workload->et_feeder;
-            managed_sys->workload->et_feeder = new ETFeeder(workload_filename);
+            managed_sys->workload->et_feeder =
+                managed_sys->workload->load_et_feeder(workload_filename);
+            managed_sys->workload->reset_iteration_tracking();
             managed_sys->workload->iteration++;
             managed_sys->workload->is_finished = false;
             // fire next iteration
@@ -517,7 +624,7 @@ void Workload::add_workload(const std::string& new_filename,
     }
     string workload_filename = new_filename + "." + to_string(sys->id) + ".et";
     // cout << workload_filename << endl;
-  
+
     // Check if workload filename exists
     if (access(workload_filename.c_str(), R_OK) < 0) {
         string error_msg;
@@ -531,11 +638,12 @@ void Workload::add_workload(const std::string& new_filename,
         LoggerFactory::get_logger("workload")->critical(error_msg);
         return;
     }
-  
+
     // there exists new workload, change the ETFeeder
     if (this->et_feeder != nullptr)
       delete this->et_feeder;
-    this->et_feeder = new ETFeeder(workload_filename);
+    this->et_feeder = load_et_feeder(workload_filename);
+    reset_iteration_tracking();
     iteration++;
     is_finished = false;
     // fire next iteration
