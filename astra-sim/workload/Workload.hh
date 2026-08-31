@@ -13,6 +13,7 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/system/Callable.hh"
 #include "astra-sim/system/CommunicatorGroup.hh"
+#include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/workload/HardwareResource.hh"
 #include "extern/graph_frontend/chakra/src/feeder/et_feeder.h"
 
@@ -20,6 +21,9 @@ namespace AstraSim {
 
 class Sys;
 class DataSet;
+
+MemoryOperation memory_operation_for_node_type(
+    ChakraProtoMsg::NodeType node_type);
 
 class Workload : public Callable {
   public:

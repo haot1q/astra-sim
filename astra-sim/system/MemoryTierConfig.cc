@@ -5,6 +5,8 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/system/MemoryTierConfig.hh"
 
+#include "astra-sim/system/memory/BandwidthResource.hh"
+
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -31,10 +33,23 @@ void validate_backend(const json& backend, const std::string& context) {
         !backend["memory-type"].is_string()) {
         throw std::invalid_argument(context + ".memory-type must be a string");
     }
-    if (!backend.contains("mem-bw") ||
-        !backend["mem-bw"].is_number_integer() ||
-        backend["mem-bw"].get<int64_t>() <= 0) {
-        throw std::invalid_argument(context + ".mem-bw must be a positive integer");
+    const bool has_scalar = backend.contains("mem-bw");
+    const bool has_directional = backend.contains("bandwidth-resource");
+    if (has_scalar == has_directional) {
+        throw std::invalid_argument(
+            context + " must declare exactly one of mem-bw or "
+            "bandwidth-resource");
+    }
+    if (has_scalar &&
+        (!backend["mem-bw"].is_number_integer() ||
+         backend["mem-bw"].get<int64_t>() <= 0)) {
+        throw std::invalid_argument(
+            context + ".mem-bw must be a positive integer");
+    }
+    if (has_directional) {
+        parse_bandwidth_resource_config(
+            backend["bandwidth-resource"],
+            context + ".bandwidth-resource");
     }
     if (!backend.contains("mem-latency") ||
         !backend["mem-latency"].is_number_integer() ||
@@ -152,13 +167,24 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
                 }
             }
 
+            const bool has_scalar = raw.contains("mem_bw_gbps");
+            const bool has_directional = raw.contains("bandwidth_resource");
+            if (has_scalar == has_directional) {
+                throw std::invalid_argument(
+                    context + " must declare exactly one of mem_bw_gbps or "
+                    "bandwidth_resource");
+            }
             json backend = {
                 {"memory-type", "MEMORY_POOL"},
                 {"memory-location", "REMOTE_MEMORY"},
-                {"mem-bw", raw.value("mem_bw_gbps", 0)},
                 {"mem-latency", raw.value("mem_latency_ns", -1)},
                 {"num-devices", raw["num_devices"]},
             };
+            if (has_scalar) {
+                backend["mem-bw"] = raw["mem_bw_gbps"];
+            } else {
+                backend["bandwidth-resource"] = raw["bandwidth_resource"];
+            }
             validate_backend(backend, context);
             tiers.push_back({
                 expected_id,

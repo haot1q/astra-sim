@@ -43,6 +43,20 @@ json tier(uint32_t id, const char* name, std::size_t devices = 1) {
     };
 }
 
+json directional_tier(uint32_t id, const char* name) {
+    auto value = tier(id, name);
+    value.erase("mem_bw_gbps");
+    value["bandwidth_resource"] = {
+        {"schema_version", "bandwidth-resource-v1"},
+        {"read_bytes_per_second", 2'000'000'000ULL},
+        {"write_bytes_per_second", 1'000'000'000ULL},
+        {"shared_bytes_per_second", 3'000'000'000ULL},
+        {"concurrency", "simultaneous"},
+        {"turnaround_ns", 0},
+    };
+    return value;
+}
+
 bool contract_holds() {
     const std::string digest = "sha256:" + std::string(64, 'a');
     auto payload = json{
@@ -50,12 +64,15 @@ bool contract_holds() {
         {"id_mode", "native"},
         {"manifest_digest", digest},
         {"tiers", json::array({
-            tier(16, "hbm"), tier(17, "lpddr", 2), tier(18, "remote")})},
+            directional_tier(16, "hbm"), tier(17, "lpddr", 2),
+            tier(18, "remote")})},
     };
     const auto parsed = AstraSim::parse_memory_tier_config(payload);
     if (!parsed.native || parsed.manifest_digest != digest ||
         parsed.tiers.size() != 3 || parsed.tiers[1].tier_id != 17 ||
-        parsed.tiers[1].backend_config.at("num-devices") != 2) {
+        parsed.tiers[1].backend_config.at("num-devices") != 2 ||
+        parsed.tiers[0].backend_config.at("bandwidth-resource")
+                .at("read_bytes_per_second") != 2'000'000'000ULL) {
         return false;
     }
     const auto temporary_path =
@@ -81,6 +98,11 @@ bool contract_holds() {
     stale_devices["tiers"][1]["num_devices"] = 3;
     auto mixed = payload;
     mixed["local_mem"] = json::object();
+    auto duplicate_bandwidth = payload;
+    duplicate_bandwidth["tiers"][0]["mem_bw_gbps"] = 1000;
+    auto overcommitted_shared = payload;
+    overcommitted_shared["tiers"][0]["bandwidth_resource"]
+                         ["shared_bytes_per_second"] = 2'999'999'999ULL;
 
     return throws_invalid_argument(
                [&]() { AstraSim::parse_memory_tier_config(zero); }) &&
@@ -90,6 +112,12 @@ bool contract_holds() {
                [&]() { AstraSim::parse_memory_tier_config(stale_devices); }) &&
            throws_invalid_argument(
                [&]() { AstraSim::parse_memory_tier_config(mixed); }) &&
+           throws_invalid_argument([&]() {
+               AstraSim::parse_memory_tier_config(duplicate_bandwidth);
+           }) &&
+           throws_invalid_argument([&]() {
+               AstraSim::parse_memory_tier_config(overcommitted_shared);
+           }) &&
            throws_invalid_argument(
                [&]() { AstraSim::validate_et_manifest_digest(digest, ""); }) &&
            throws_invalid_argument([&]() {
