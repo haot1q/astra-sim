@@ -82,8 +82,11 @@ json receipt_json(const DmaReceipt& receipt,
                   const DmaSchedulerConfig& scheduler_config,
                   uint64_t overlap_compute_ns,
                   uint64_t overlap_compute_bytes,
-                  const std::optional<uint64_t>& exposed_to_dependent_ns) {
-    return {
+                  const std::optional<uint64_t>& exposed_to_dependent_ns,
+                  const std::optional<std::string>& page_id,
+                  const std::optional<std::string>& transaction_id,
+                  const std::optional<uint32_t>& expected_residency_version) {
+    json payload = {
         {"schema_version", kMemoryMovementReceiptSchemaVersion},
         {"run_id", run_id},
         {"instance_id", instance_id},
@@ -114,6 +117,13 @@ json receipt_json(const DmaReceipt& receipt,
                                         : json(nullptr)},
         {"status", "completed"},
     };
+    if (page_id.has_value()) {
+        payload["page_id"] = *page_id;
+        payload["transaction_id"] = *transaction_id;
+        payload["expected_residency_version"] =
+            *expected_residency_version;
+    }
+    return payload;
 }
 
 uint64_t time_proportional_bytes(uint64_t bytes,
@@ -189,6 +199,22 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
         kind != "page_demote") {
         throw std::invalid_argument("unsupported memory movement kind");
     }
+    const bool page_movement =
+        kind == "page_promote" || kind == "page_demote";
+    std::optional<std::string> page_id;
+    std::optional<std::string> transaction_id;
+    std::optional<uint32_t> expected_residency_version;
+    if (page_movement) {
+        page_id = string_attr(node, "movement_page_id");
+        transaction_id = string_attr(node, "movement_transaction_id");
+        expected_residency_version =
+            uint32_attr(node, "movement_expected_residency_version");
+    } else if (node->has_other_attr("movement_page_id") ||
+               node->has_other_attr("movement_transaction_id") ||
+               node->has_other_attr("movement_expected_residency_version")) {
+        throw std::invalid_argument(
+            "non-page movement must not carry page identity");
+    }
     const std::string path_id = string_attr(node, "movement_path_id");
     const uint32_t engine_count = uint32_attr(node, "movement_engine_count");
     const uint32_t max_priority_burst =
@@ -235,7 +261,7 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
         string_list_attr(node, "movement_resource_ids"),
         string_list_attr(node, "movement_dependencies"),
         foreground,
-        kind == "page_promote" || kind == "page_demote",
+        page_movement,
     };
     scheduler_->submit(std::move(job));
     const auto inserted = submissions_.emplace(
@@ -246,6 +272,9 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
                       run_id,
                       string_attr(node, "movement_instance_id"),
                       manifest_digest,
+                      page_id,
+                      transaction_id,
+                      expected_residency_version,
                   });
     if (!inserted.second) {
         throw std::invalid_argument("duplicate movement submission context");
@@ -320,7 +349,9 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
         receipt_json(receipt, submission.run_id, submission.instance_id,
                      submission.manifest_digest, scheduler_->config(),
                      overlap_compute_ns, overlap_compute_bytes,
-                     exposed_to_dependent_ns)
+                     exposed_to_dependent_ns, submission.page_id,
+                     submission.transaction_id,
+                     submission.expected_residency_version)
             .dump());
     submissions_.erase(event_id);
     if (submission.foreground) {
