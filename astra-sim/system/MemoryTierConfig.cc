@@ -12,6 +12,7 @@ LICENSE file in the root directory of this source tree.
 #include <fstream>
 #include <regex>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -81,6 +82,122 @@ std::string legacy_name(uint32_t tier_id) {
     return names[tier_id];
 }
 
+void validate_ucie_endpoints(
+    const json& raw,
+    const std::string& context,
+    const std::unordered_map<std::string, uint32_t>& tier_devices,
+    uint32_t stack_count) {
+    if (!raw.contains("endpoints") || !raw["endpoints"].is_array() ||
+        raw["endpoints"].size() != 2 ||
+        !raw["endpoints"][0].is_string() ||
+        !raw["endpoints"][1].is_string() ||
+        raw["endpoints"][0] == raw["endpoints"][1]) {
+        throw std::invalid_argument(
+            context + ".endpoints must be two distinct strings");
+    }
+    const auto left = raw["endpoints"][0].get<std::string>();
+    const auto right = raw["endpoints"][1].get<std::string>();
+    const bool left_compute = left == "compute";
+    const bool right_compute = right == "compute";
+    if (left_compute == right_compute) {
+        throw std::invalid_argument(
+            context + ".endpoints must be compute and one declared tier");
+    }
+    const auto& peer = left_compute ? right : left;
+    const auto found = tier_devices.find(peer);
+    if (found == tier_devices.end()) {
+        throw std::invalid_argument(
+            context + " peer '" + peer + "' is not a declared tier");
+    }
+    if (stack_count != found->second) {
+        throw std::invalid_argument(
+            context + ".stack_count must equal the peer device count");
+    }
+}
+
+std::vector<UcieLinkConfig> parse_ucie_links(
+    const json& payload,
+    const std::unordered_map<std::string, uint32_t>& tier_devices) {
+    if (!payload.contains("ucie_links")) {
+        return {};
+    }
+    const auto& raw_links = payload["ucie_links"];
+    if (!raw_links.is_array() || raw_links.empty()) {
+        throw std::invalid_argument(
+            "ucie_links must be a non-empty array when present");
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "id", "endpoints", "stack_count", "header_bytes", "latency_ns",
+        "bandwidth_resource",
+    };
+    std::vector<UcieLinkConfig> links;
+    std::unordered_set<std::string> ids;
+    for (std::size_t index = 0; index < raw_links.size(); ++index) {
+        const auto context = "ucie_links[" + std::to_string(index) + "]";
+        const auto& raw = raw_links[index];
+        if (!raw.is_object()) {
+            throw std::invalid_argument(context + " must be an object");
+        }
+        for (const auto& [key, value] : raw.items()) {
+            (void)value;
+            if (!allowed.count(key)) {
+                throw std::invalid_argument(
+                    context + " has unknown field '" + key + "'");
+            }
+        }
+        if (!raw.contains("id") || !raw["id"].is_string()) {
+            throw std::invalid_argument(context + ".id must be a string");
+        }
+        const auto id = raw["id"].get<std::string>();
+        if (!std::regex_match(id, kTierName) || !ids.insert(id).second ||
+            tier_devices.count(id) != 0) {
+            throw std::invalid_argument(
+                context + ".id is invalid, duplicate, or collides with a tier");
+        }
+        if (!raw.contains("stack_count") ||
+            !raw["stack_count"].is_number_unsigned() ||
+            raw["stack_count"].get<uint32_t>() == 0) {
+            throw std::invalid_argument(
+                context + ".stack_count must be a positive integer");
+        }
+        const auto stack_count = raw["stack_count"].get<uint32_t>();
+        validate_ucie_endpoints(raw, context, tier_devices, stack_count);
+        if (!raw.contains("header_bytes") ||
+            !raw["header_bytes"].is_number_unsigned()) {
+            throw std::invalid_argument(
+                context + ".header_bytes must be a non-negative integer");
+        }
+        if (!raw.contains("latency_ns") ||
+            !raw["latency_ns"].is_number_unsigned()) {
+            throw std::invalid_argument(
+                context + ".latency_ns must be a non-negative integer");
+        }
+        if (!raw.contains("bandwidth_resource")) {
+            throw std::invalid_argument(
+                context + " must declare bandwidth_resource");
+        }
+        json backend = {
+            {"memory-type", "MEMORY_POOL"},
+            {"memory-location", "REMOTE_MEMORY"},
+            {"mem-latency", raw["latency_ns"]},
+            {"num-devices", raw["stack_count"]},
+            {"bandwidth-resource", raw["bandwidth_resource"]},
+        };
+        parse_bandwidth_resource_config(
+            backend["bandwidth-resource"], context + ".bandwidth_resource");
+        links.push_back({
+            id,
+            {raw["endpoints"][0].get<std::string>(),
+             raw["endpoints"][1].get<std::string>()},
+            raw["stack_count"].get<uint32_t>(),
+            raw["header_bytes"].get<uint64_t>(),
+            raw["latency_ns"].get<uint64_t>(),
+            std::move(backend),
+        });
+    }
+    return links;
+}
+
 }  // namespace
 
 MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
@@ -116,6 +233,7 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
 
         std::vector<MemoryTierConfig> tiers;
         std::unordered_set<std::string> names;
+        std::unordered_map<std::string, uint32_t> devices_by_name;
         for (std::size_t index = 0; index < payload["tiers"].size(); ++index) {
             const auto& raw = payload["tiers"][index];
             const auto context = "tiers[" + std::to_string(index) + "]";
@@ -154,6 +272,7 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
                 throw std::invalid_argument(
                     context + ".num_devices does not match devices");
             }
+            devices_by_name.emplace(name, raw["num_devices"].get<uint32_t>());
             for (std::size_t device_id = 0;
                  device_id < raw["devices"].size(); ++device_id) {
                 const auto& device = raw["devices"][device_id];
@@ -192,7 +311,9 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
                 raw["num_devices"].get<uint32_t>(),
                 std::move(backend)});
         }
-        return {true, digest, std::move(tiers)};
+        return {
+            true, digest, std::move(tiers),
+            parse_ucie_links(payload, devices_by_name)};
     }
 
     std::vector<MemoryTierConfig> tiers;
@@ -235,6 +356,10 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
     }
     if (tiers.empty()) {
         throw std::invalid_argument("memory configuration contains no backends");
+    }
+    if (payload.contains("ucie_links")) {
+        throw std::invalid_argument(
+            "legacy memory configuration cannot declare ucie_links");
     }
     return {false, "", std::move(tiers)};
 }

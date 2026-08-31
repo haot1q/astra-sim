@@ -21,10 +21,20 @@ struct MemoryTierConfig {
     nlohmann::json backend_config;
 };
 
+struct UcieLinkConfig {
+    std::string id;
+    std::vector<std::string> endpoints;
+    uint32_t stack_count;
+    uint64_t header_bytes;
+    uint64_t latency_ns;
+    nlohmann::json backend_config;
+};
+
 struct MemoryTierConfigSet {
     bool native;
     std::string manifest_digest;
     std::vector<MemoryTierConfig> tiers;
+    std::vector<UcieLinkConfig> ucie_links;
 };
 
 MemoryTierConfigSet parse_memory_tier_config(const nlohmann::json& payload);

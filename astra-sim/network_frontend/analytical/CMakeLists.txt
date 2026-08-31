@@ -29,6 +29,7 @@ file(GLOB srcs_congestion_aware
         ${CMAKE_CURRENT_SOURCE_DIR}/congestion_aware/*.cc
 )
 
+include(CTest)
 if(BUILD_TESTING)
     add_executable(AstraSim_MemoryTierConfig_Test
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/MemoryTierConfigTest.cc)
@@ -59,6 +60,12 @@ if(BUILD_TESTING)
     target_link_libraries(AstraSim_DmaScheduler_Test PRIVATE AstraSim)
     add_test(NAME AstraSim_DmaScheduler_Test
             COMMAND AstraSim_DmaScheduler_Test)
+
+    add_executable(AstraSim_UcieTransport_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/UcieTransportTest.cc)
+    target_link_libraries(AstraSim_UcieTransport_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_UcieTransport_Test
+            COMMAND AstraSim_UcieTransport_Test)
 endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")

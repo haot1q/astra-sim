@@ -150,8 +150,10 @@ Sys::Sys(int id,
          vector<int> queues_per_dim,
          double injection_scale,
          double comm_scale,
-         bool rendezvous_enabled)
+         bool rendezvous_enabled,
+         UcieLinkRegistry ucie_link_registry)
     : memory_tiers(memory_tier_bindings),
+      ucie_links(std::move(ucie_link_registry)),
       tier_manifest_digest(std::move(tier_manifest_digest)) {
     if ((id + 1) > this->all_sys.size()) {
         this->all_sys.resize(id + 1);
@@ -168,6 +170,10 @@ Sys::Sys(int id,
     this->roofline = nullptr;
 
     for (const auto& binding : memory_tier_bindings) {
+        binding.api->set_sys(id, this);
+    }
+    for (const auto& [link_id, binding] : ucie_links.all()) {
+        (void)link_id;
         binding.api->set_sys(id, this);
     }
 
@@ -275,6 +281,10 @@ Sys::Sys(int id,
 AstraMemoryAPI* Sys::memory_api(
     MemoryTierId tier_id, uint32_t device_id) const {
     return memory_tiers.at(tier_id, device_id);
+}
+
+const UcieLinkBinding& Sys::ucie_link(const std::string& link_id) const {
+    return ucie_links.at(link_id);
 }
 
 void Sys::validate_tier_manifest_digest(
