@@ -48,6 +48,9 @@ class MemoryMovementExecutor : public Callable {
         std::string run_id;
         std::string instance_id;
         std::string manifest_digest;
+        std::optional<std::string> page_id;
+        std::optional<std::string> transaction_id;
+        std::optional<uint32_t> expected_residency_version;
     };
 
     void start_source_read(const DmaDispatch& dispatch);
