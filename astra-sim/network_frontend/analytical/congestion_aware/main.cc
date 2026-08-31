@@ -12,6 +12,7 @@ LICENSE file in the root directory of this source tree.
 #include <memory_backend/analytical/AnalyticalMemory.hh>
 #include "astra-sim/system/MemoryTierConfig.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
+#include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -107,6 +108,23 @@ int main(int argc, char* argv[]) {
            memory_levels.back().get()});
     }
     const auto ucie_links = UcieLinkRegistry(std::move(ucie_bindings));
+    auto movement_bindings = std::vector<MovementBandwidthBinding>();
+    for (const auto& resource :
+         memory_config.movement_bandwidth_resources) {
+      const auto path = write_temporary_memory_backend_config(
+          resource.backend_config);
+      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
+      std::remove(path.c_str());
+      movement_bindings.push_back(
+          {resource.id, resource.stack_count, resource.latency_ns,
+           memory_levels.back().get()});
+    }
+    const auto movement_paths = memory_config.has_movement_paths
+        ? MovementPathRegistry(
+              memory_config.selected_movement_path_id,
+              memory_config.movement_path_capabilities,
+              std::move(movement_bindings))
+        : MovementPathRegistry();
 
     auto systems = std::vector<Sys*>();
 
@@ -123,7 +141,8 @@ int main(int argc, char* argv[]) {
                     system_configuration, memory_tiers,
                     memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
-                    comm_scale, rendezvous_protocol, ucie_links);
+                    comm_scale, rendezvous_protocol, ucie_links,
+                    movement_paths);
 
         // push back network and system
         network_apis.push_back(std::move(network_api));

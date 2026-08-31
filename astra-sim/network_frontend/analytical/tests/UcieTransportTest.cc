@@ -60,6 +60,57 @@ json native_hbm_tier() {
     };
 }
 
+json movement_resource(const std::string& id) {
+    return {
+        {"id", id},
+        {"stack_count", 1u},
+        {"latency_ns", 20u},
+        {"bandwidth_resource",
+         {
+             {"schema_version", "bandwidth-resource-v1"},
+             {"read_bytes_per_second", 500'000'000ULL},
+             {"write_bytes_per_second", 500'000'000ULL},
+             {"shared_bytes_per_second", 500'000'000ULL},
+             {"concurrency", "serialized"},
+             {"turnaround_ns", 0u},
+         }},
+    };
+}
+
+json movement_paths() {
+    return {
+        {"schema_version", "movement-path-v1"},
+        {"selection_mode", "fixed"},
+        {"selected_capability_id", "gpu_routed"},
+        {"capabilities",
+         json::array(
+             {{{"id", "gpu_routed"},
+               {"engine_location", "gpu"},
+               {"engine_count", 1u},
+               {"max_priority_burst", 4u},
+               {"max_in_flight_page_movements", 1u},
+               {"timing_provenance", "estimated"},
+               {"segments",
+                json::array(
+                    {{{"id", "base-to-gpu"},
+                      {"kind", "ucie_transaction"},
+                      {"resource_ref", "ucie-frontside"},
+                      {"operation", "read"},
+                      {"byte_rule", "payload"}},
+                     {{"id", "gpu-dma"},
+                      {"kind", "bandwidth_resource"},
+                      {"resource_ref", "gpu-dma"},
+                      {"operation", "write"},
+                      {"byte_rule", "payload"}},
+                     {{"id", "gpu-to-base"},
+                      {"kind", "ucie_transaction"},
+                      {"resource_ref", "ucie-frontside"},
+                      {"operation", "write"},
+                      {"byte_rule", "payload"}}})}}})},
+        {"bandwidth_resources", json::array({movement_resource("gpu-dma")})},
+    };
+}
+
 bool contract_holds() {
     using AstraSim::BandwidthResource;
     using AstraSim::MemoryOperation;
@@ -117,8 +168,17 @@ bool contract_holds() {
         {"id_mode", "native"},
         {"manifest_digest", "sha256:" + std::string(64, 'c')},
         {"tiers", json::array({native_hbm_tier()})},
+        {"home_domain_topology",
+         {{"schema_version", "home-domain-topology-v1"},
+          {"domains",
+           json::array({{{"home_domain_id", 0u},
+                         {"hot", "hbm:0"},
+                         {"cold", "lpddr:0"}}})},
+          {"home_mapping",
+           {{"policy", "stable_hash_v1"}, {"epoch", 0u}, {"seed", 7u}}}}},
         {"ucie_links", json::array({ucie_link(
                            500'000'000ULL, 500'000'000ULL, 1'000'000'000ULL)})},
+        {"movement_paths", movement_paths()},
     };
     AstraSim::MemoryTierConfigSet parsed;
     try {
@@ -129,7 +189,12 @@ bool contract_holds() {
     if (parsed.ucie_links.size() != 1 ||
         parsed.ucie_links[0].id != "ucie-frontside" ||
         parsed.ucie_links[0].header_bytes != 64 ||
-        parsed.ucie_links[0].latency_ns != 20) {
+        parsed.ucie_links[0].latency_ns != 20 ||
+        !parsed.has_movement_paths ||
+        parsed.selected_movement_path_id != "gpu_routed" ||
+        parsed.movement_path_capabilities.size() != 1 ||
+        parsed.movement_path_capabilities[0].segments.size() != 3 ||
+        parsed.movement_bandwidth_resources.size() != 1) {
         return false;
     }
 
@@ -147,6 +212,14 @@ bool contract_holds() {
         json::array({"compute", "lpddr"});
     auto stack_mismatch = payload;
     stack_mismatch["ucie_links"][0]["stack_count"] = 2u;
+    auto unsupported_selection = payload;
+    unsupported_selection["movement_paths"]["selected_capability_id"] =
+        "base_die_local";
+    auto missing_round_trip = payload;
+    missing_round_trip["movement_paths"]["capabilities"][0]["segments"].erase(2);
+    auto unknown_resource = payload;
+    unknown_resource["movement_paths"]["capabilities"][0]["segments"][1]
+                    ["resource_ref"] = "missing";
     return throws<std::invalid_argument>(
                [&]() { parse_memory_tier_config(unknown); }) &&
         throws<std::invalid_argument>(
@@ -158,7 +231,13 @@ bool contract_holds() {
         throws<std::invalid_argument>(
                [&]() { parse_memory_tier_config(unknown_peer); }) &&
         throws<std::invalid_argument>(
-               [&]() { parse_memory_tier_config(stack_mismatch); });
+               [&]() { parse_memory_tier_config(stack_mismatch); }) &&
+        throws<std::invalid_argument>(
+               [&]() { parse_memory_tier_config(unsupported_selection); }) &&
+        throws<std::invalid_argument>(
+               [&]() { parse_memory_tier_config(missing_round_trip); }) &&
+        throws<std::invalid_argument>(
+               [&]() { parse_memory_tier_config(unknown_resource); });
 }
 
 }  // namespace

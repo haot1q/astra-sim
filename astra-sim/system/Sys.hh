@@ -17,6 +17,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MemoryTierRegistry.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
+#include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/Roofline.hh"
 #include "astra-sim/system/UsageTracker.hh"
 #include "astra-sim/system/topology/RingTopology.hh"
@@ -78,7 +79,8 @@ class Sys : public Callable {
         double injection_scale,
         double comm_scale,
         bool rendezvous_enabled,
-        UcieLinkRegistry ucie_links = UcieLinkRegistry());
+        UcieLinkRegistry ucie_links = UcieLinkRegistry(),
+        MovementPathRegistry movement_paths = MovementPathRegistry());
     ~Sys();
     //---------------------------------------------------------------------------
 
@@ -271,8 +273,11 @@ class Sys : public Callable {
     double local_mem_bw;
     MemoryTierRegistry memory_tiers;
     UcieLinkRegistry ucie_links;
+    MovementPathRegistry movement_paths;
     std::string tier_manifest_digest;
     const UcieLinkBinding& ucie_link(const std::string& link_id) const;
+    const MovementBandwidthBinding& movement_resource(
+        const std::string& resource_id) const;
     std::unique_ptr<MemoryMovementExecutor> memory_movement_executor;
 
     // memory bus

@@ -35,6 +35,20 @@ struct MemoryEndpointTiming {
     uint64_t finish_ns;
 };
 
+struct MemoryPathSegmentTiming {
+    std::string segment_id;
+    std::string kind;
+    std::string resource_ref;
+    std::string operation;
+    uint64_t logical_bytes;
+    uint64_t billed_bytes;
+    uint64_t ready_ns;
+    uint64_t start_ns;
+    uint64_t finish_ns;
+    uint64_t queue_wait_ns;
+    uint64_t service_ns;
+};
+
 class MemoryMovementExecutor : public Callable {
   public:
     explicit MemoryMovementExecutor(Sys* sys);
@@ -61,11 +75,25 @@ class MemoryMovementExecutor : public Callable {
         std::optional<std::string> transaction_id;
         std::optional<uint32_t> expected_residency_version;
         std::optional<uint32_t> home_domain_id;
+        std::string path_schema_version;
+        std::string path_contract_status;
+        std::string timing_provenance;
+        std::size_t next_segment_index;
+        std::optional<uint64_t> active_segment_ready_ns;
+        std::optional<uint64_t> active_segment_start_ns;
+        uint64_t active_segment_billed_bytes;
+        uint64_t active_segment_queue_wait_ns;
+        uint64_t active_segment_service_ns;
+        std::vector<MemoryPathSegmentTiming> segment_timings;
         std::optional<MemoryEndpointTiming> source_endpoint;
         std::optional<MemoryEndpointTiming> destination_endpoint;
     };
 
     void start_source_read(const DmaDispatch& dispatch);
+    void start_next_segment(const std::string& event_id);
+    void start_segment_hop(const std::string& event_id,
+                           std::size_t segment_index,
+                           std::size_t hop_index);
     void start_destination_write(const std::string& event_id);
     void finish(const std::string& event_id);
     uint64_t compute_overlap_ns(uint64_t start_ns, uint64_t finish_ns) const;

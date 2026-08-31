@@ -18,6 +18,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/Sys.hh"
 #include "astra-sim/system/WorkloadLayerHandlerData.hh"
+#include "astra-sim/system/memory/UcieTransport.hh"
 #include "astra-sim/workload/Workload.hh"
 #include "extern/graph_frontend/chakra/src/feeder/et_feeder_node.h"
 #include "extern/helper/json/json.hpp"
@@ -29,11 +30,20 @@ using Chakra::ETFeederNode;
 using ChakraProtoMsg::AttributeProto;
 using json = nlohmann::json;
 
+enum class MovementStage {
+    SourceEndpoint,
+    Intermediate,
+    DestinationEndpoint,
+};
+
 class MovementHandlerData : public WorkloadLayerHandlerData {
   public:
     std::string event_id;
     uint32_t tier_id = 0;
-    bool source_read = true;
+    MovementStage stage = MovementStage::SourceEndpoint;
+    std::size_t segment_index = 0;
+    std::size_t hop_index = 0;
+    uint64_t billed_bytes = 0;
 };
 
 json endpoint_timing_json(const MemoryEndpointTiming& timing) {
@@ -46,6 +56,22 @@ json endpoint_timing_json(const MemoryEndpointTiming& timing) {
         {"finish_ns", timing.finish_ns},
         {"queue_wait_ns", timing.start_ns - timing.ready_ns},
         {"service_ns", timing.finish_ns - timing.start_ns},
+    };
+}
+
+json segment_timing_json(const MemoryPathSegmentTiming& timing) {
+    return {
+        {"segment_id", timing.segment_id},
+        {"kind", timing.kind},
+        {"resource_ref", timing.resource_ref},
+        {"operation", timing.operation},
+        {"logical_bytes", timing.logical_bytes},
+        {"billed_bytes", timing.billed_bytes},
+        {"ready_ns", timing.ready_ns},
+        {"start_ns", timing.start_ns},
+        {"finish_ns", timing.finish_ns},
+        {"queue_wait_ns", timing.queue_wait_ns},
+        {"service_ns", timing.service_ns},
     };
 }
 
@@ -101,6 +127,10 @@ json receipt_json(const DmaReceipt& receipt,
                   const std::optional<std::string>& transaction_id,
                   const std::optional<uint32_t>& expected_residency_version,
                   const std::optional<uint32_t>& home_domain_id,
+                  const std::string& path_schema_version,
+                  const std::string& path_contract_status,
+                  const std::string& timing_provenance,
+                  const std::vector<MemoryPathSegmentTiming>& segment_timings,
                   const MemoryEndpointTiming& source_endpoint,
                   const MemoryEndpointTiming& destination_endpoint) {
     json payload = {
@@ -120,6 +150,9 @@ json receipt_json(const DmaReceipt& receipt,
         {"phase", receipt.phase},
         {"priority_class", dma_priority_class_name(receipt.priority)},
         {"path_id", receipt.path_id},
+        {"path_schema_version", path_schema_version},
+        {"path_contract_status", path_contract_status},
+        {"timing_provenance", timing_provenance},
         {"engine_id", receipt.engine_id},
         {"engine_count", scheduler_config.engine_count},
         {"max_priority_burst", scheduler_config.max_priority_burst},
@@ -136,7 +169,11 @@ json receipt_json(const DmaReceipt& receipt,
         {"endpoint_timings",
          json::array({endpoint_timing_json(source_endpoint),
                       endpoint_timing_json(destination_endpoint)})},
+        {"segment_timings", json::array()},
     };
+    for (const auto& timing : segment_timings) {
+        payload["segment_timings"].push_back(segment_timing_json(timing));
+    }
     if (page_id.has_value()) {
         payload["page_id"] = *page_id;
         payload["transaction_id"] = *transaction_id;
@@ -240,11 +277,98 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
             "non-page movement must not carry page identity");
     }
     const std::string path_id = string_attr(node, "movement_path_id");
+    const bool has_path_contract =
+        node->has_other_attr("movement_path_contract_status");
+    const std::string path_contract_status = has_path_contract
+        ? string_attr(node, "movement_path_contract_status")
+        : "compatibility_checkpoint";
+    const std::string path_schema_version = has_path_contract
+        ? string_attr(node, "movement_path_schema_version")
+        : "adr-0020-checkpoint";
+    const std::string timing_provenance = has_path_contract
+        ? string_attr(node, "movement_path_timing_provenance")
+        : "proxy_unimplemented";
     const uint32_t engine_count = uint32_attr(node, "movement_engine_count");
     const uint32_t max_priority_burst =
         uint32_attr(node, "movement_max_priority_burst");
     const uint32_t max_in_flight_page_movements =
         uint32_attr(node, "movement_max_in_flight_page_movements");
+    const auto resource_ids =
+        string_list_attr(node, "movement_resource_ids");
+    if (path_contract_status == "implemented") {
+        if (path_schema_version != "movement-path-v1" ||
+            (timing_provenance != "estimated" &&
+             timing_provenance != "measured")) {
+            throw std::invalid_argument(
+                "implemented movement path has invalid schema or provenance");
+        }
+        if (sys_->movement_paths.empty() ||
+            sys_->movement_paths.selected_id() != path_id) {
+            throw std::invalid_argument(
+                "ET movement path does not match the runtime manifest selection");
+        }
+        const auto& capability =
+            sys_->movement_paths.capability(path_id);
+        if (capability.engine_count != engine_count ||
+            capability.max_priority_burst != max_priority_burst ||
+            capability.max_in_flight_page_movements !=
+                max_in_flight_page_movements ||
+            capability.timing_provenance != timing_provenance) {
+            throw std::invalid_argument(
+                "ET movement path capability differs from runtime manifest");
+        }
+        const auto segment_ids =
+            string_list_attr(node, "movement_segment_ids");
+        const auto segment_kinds =
+            string_list_attr(node, "movement_segment_kinds");
+        const auto segment_refs =
+            string_list_attr(node, "movement_segment_resource_refs");
+        const auto segment_operations =
+            string_list_attr(node, "movement_segment_operations");
+        const auto segment_byte_rules =
+            string_list_attr(node, "movement_segment_byte_rules");
+        const auto segment_count = capability.segments.size();
+        if (segment_ids.size() != segment_count ||
+            segment_kinds.size() != segment_count ||
+            segment_refs.size() != segment_count ||
+            segment_operations.size() != segment_count ||
+            segment_byte_rules.size() != segment_count) {
+            throw std::invalid_argument(
+                "ET movement path segment cardinality differs from manifest");
+        }
+        std::vector<std::string> expected_resources = {"lpddr_read"};
+        for (std::size_t index = 0; index < segment_count; ++index) {
+            const auto& segment = capability.segments[index];
+            if (segment_ids[index] != segment.id ||
+                segment_kinds[index] != segment.kind ||
+                segment_refs[index] != segment.resource_ref ||
+                segment_operations[index] != segment.operation ||
+                segment_byte_rules[index] != segment.byte_rule) {
+                throw std::invalid_argument(
+                    "ET movement path segments differ from runtime manifest");
+            }
+            expected_resources.push_back(
+                segment.id + ":" + segment.resource_ref);
+        }
+        expected_resources.push_back("hbm_write");
+        if (resource_ids != expected_resources) {
+            throw std::invalid_argument(
+                "ET movement resource bill differs from runtime manifest");
+        }
+    } else if (path_contract_status == "compatibility_checkpoint") {
+        if (!sys_->movement_paths.empty()) {
+            throw std::invalid_argument(
+                "runtime manifest path cannot use compatibility checkpoint ET");
+        }
+        if (path_schema_version != "adr-0020-checkpoint" ||
+            timing_provenance != "proxy_unimplemented") {
+            throw std::invalid_argument(
+                "compatibility checkpoint must remain proxy_unimplemented");
+        }
+    } else {
+        throw std::invalid_argument(
+            "unsupported movement path contract status");
+    }
     if (scheduler_ == nullptr) {
         scheduler_ = std::make_unique<DmaScheduler>(
             DmaSchedulerConfig{path_id, engine_count, max_priority_burst,
@@ -282,7 +406,7 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
         node->tensor_device(),
         uint32_attr(node, "movement_destination_tier_id"),
         uint32_attr(node, "movement_destination_device_id"),
-        string_list_attr(node, "movement_resource_ids"),
+        resource_ids,
         string_list_attr(node, "movement_dependencies"),
         foreground,
         page_movement,
@@ -306,6 +430,16 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
                       transaction_id,
                       expected_residency_version,
                       home_domain_id,
+                      path_schema_version,
+                      path_contract_status,
+                      timing_provenance,
+                      0,
+                      std::nullopt,
+                      std::nullopt,
+                      0,
+                      0,
+                      0,
+                      {},
                       std::nullopt,
                       std::nullopt,
                   });
@@ -333,11 +467,97 @@ void MemoryMovementExecutor::start_source_read(const DmaDispatch& dispatch) {
     data->event_id = dispatch.job.event_id;
     data->tier_id = dispatch.job.source_tier_id;
     data->device_id = dispatch.job.source_device_id;
-    data->source_read = true;
+    data->stage = MovementStage::SourceEndpoint;
     try {
         sys_->memory_api(dispatch.job.source_tier_id,
                          dispatch.job.source_device_id)
             ->issue({dispatch.job.bytes, MemoryOperation::Read}, data);
+    } catch (...) {
+        delete data;
+        throw;
+    }
+}
+
+void MemoryMovementExecutor::start_next_segment(
+    const std::string& event_id) {
+    auto& submission = submissions_.at(event_id);
+    if (submission.path_contract_status != "implemented") {
+        start_destination_write(event_id);
+        return;
+    }
+    const auto active = scheduler_->active_job(event_id);
+    const auto& capability =
+        sys_->movement_paths.capability(active.path_id);
+    if (submission.next_segment_index == capability.segments.size()) {
+        start_destination_write(event_id);
+        return;
+    }
+    submission.active_segment_ready_ns.reset();
+    submission.active_segment_start_ns.reset();
+    submission.active_segment_billed_bytes = 0;
+    submission.active_segment_queue_wait_ns = 0;
+    submission.active_segment_service_ns = 0;
+    start_segment_hop(event_id, submission.next_segment_index, 0);
+}
+
+void MemoryMovementExecutor::start_segment_hop(
+    const std::string& event_id,
+    std::size_t segment_index,
+    std::size_t hop_index) {
+    const auto active = scheduler_->active_job(event_id);
+    const auto& capability =
+        sys_->movement_paths.capability(active.path_id);
+    if (segment_index >= capability.segments.size()) {
+        throw std::out_of_range("movement segment index is out of range");
+    }
+    const auto& segment = capability.segments[segment_index];
+    auto* data = new MovementHandlerData;
+    data->sys_id = sys_->id;
+    data->completion_target = this;
+    data->event_id = event_id;
+    data->device_id = active.source_device_id;
+    data->stage = MovementStage::Intermediate;
+    data->segment_index = segment_index;
+    data->hop_index = hop_index;
+    try {
+        if (segment.kind == "bandwidth_resource") {
+            if (hop_index != 0) {
+                throw std::logic_error(
+                    "bandwidth segment has more than one hop");
+            }
+            const auto& resource =
+                sys_->movement_resource(segment.resource_ref);
+            if (active.source_device_id >= resource.stack_count) {
+                throw std::out_of_range(
+                    "movement resource home domain is out of range");
+            }
+            const auto operation = segment.operation == "read"
+                ? MemoryOperation::Read
+                : MemoryOperation::Write;
+            data->billed_bytes = active.bytes;
+            resource.api->issue({active.bytes, operation}, data);
+            return;
+        }
+        if (segment.kind != "ucie_transaction") {
+            throw std::invalid_argument(
+                "unsupported movement path segment kind");
+        }
+        const auto& link = sys_->ucie_link(segment.resource_ref);
+        if (active.source_device_id >= link.stack_count) {
+            throw std::out_of_range(
+                "movement UCIe home domain is out of range");
+        }
+        const auto operation = segment.operation == "read"
+            ? MemoryOperation::Read
+            : MemoryOperation::Write;
+        const auto hops = ucie_transaction_hops(
+            operation, active.bytes, link.header_bytes);
+        if (hop_index >= hops.size()) {
+            throw std::out_of_range("movement UCIe hop is out of range");
+        }
+        data->billed_bytes = hops[hop_index].bytes;
+        link.api->issue(
+            {hops[hop_index].bytes, hops[hop_index].operation}, data);
     } catch (...) {
         delete data;
         throw;
@@ -355,7 +575,7 @@ void MemoryMovementExecutor::start_destination_write(
     data->event_id = event_id;
     data->tier_id = active.destination_tier_id;
     data->device_id = active.destination_device_id;
-    data->source_read = false;
+    data->stage = MovementStage::DestinationEndpoint;
     try {
         sys_->memory_api(active.destination_tier_id,
                          active.destination_device_id)
@@ -393,6 +613,10 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
                      submission.transaction_id,
                      submission.expected_residency_version,
                      submission.home_domain_id,
+                     submission.path_schema_version,
+                     submission.path_contract_status,
+                     submission.timing_provenance,
+                     submission.segment_timings,
                      *submission.source_endpoint,
                      *submission.destination_endpoint)
             .dump());
@@ -413,32 +637,89 @@ void MemoryMovementExecutor::call(EventType type, CallData* data) {
     }
     auto* movement = static_cast<MovementHandlerData*>(data);
     const std::string event_id = movement->event_id;
-    const bool source_read = movement->source_read;
     if (!(movement->memory_ready_ns <= movement->memory_start_ns &&
           movement->memory_start_ns <= movement->memory_finish_ns &&
           movement->memory_finish_ns == Sys::boostedTick())) {
         delete movement;
         throw std::logic_error("invalid analytical memory endpoint timing");
     }
-    const MemoryEndpointTiming timing{
-        movement->tier_id,
-        movement->device_id,
-        source_read ? "read" : "write",
-        movement->memory_ready_ns,
-        movement->memory_start_ns,
-        movement->memory_finish_ns,
-    };
     auto& submission = submissions_.at(event_id);
-    if (source_read) {
-        submission.source_endpoint = timing;
+    const auto stage = movement->stage;
+    const auto segment_index = movement->segment_index;
+    const auto hop_index = movement->hop_index;
+    const auto billed_bytes = movement->billed_bytes;
+    if (stage == MovementStage::SourceEndpoint ||
+        stage == MovementStage::DestinationEndpoint) {
+        const MemoryEndpointTiming timing{
+            movement->tier_id,
+            movement->device_id,
+            stage == MovementStage::SourceEndpoint ? "read" : "write",
+            movement->memory_ready_ns,
+            movement->memory_start_ns,
+            movement->memory_finish_ns,
+        };
+        if (stage == MovementStage::SourceEndpoint) {
+            submission.source_endpoint = timing;
+        } else {
+            submission.destination_endpoint = timing;
+        }
     } else {
-        submission.destination_endpoint = timing;
+        if (segment_index != submission.next_segment_index) {
+            delete movement;
+            throw std::logic_error(
+                "movement segment completion arrived out of order");
+        }
+        if (!submission.active_segment_ready_ns.has_value()) {
+            submission.active_segment_ready_ns = movement->memory_ready_ns;
+            submission.active_segment_start_ns = movement->memory_start_ns;
+        }
+        submission.active_segment_billed_bytes += billed_bytes;
+        submission.active_segment_queue_wait_ns +=
+            movement->memory_start_ns - movement->memory_ready_ns;
+        submission.active_segment_service_ns +=
+            movement->memory_finish_ns - movement->memory_start_ns;
     }
     delete movement;
-    if (source_read) {
-        start_destination_write(event_id);
-    } else {
+    if (stage == MovementStage::SourceEndpoint) {
+        start_next_segment(event_id);
+    } else if (stage == MovementStage::DestinationEndpoint) {
         finish(event_id);
+    } else {
+        const auto active = scheduler_->active_job(event_id);
+        const auto& segment = sys_->movement_paths
+            .capability(active.path_id)
+            .segments[segment_index];
+        std::size_t hop_count = 1;
+        if (segment.kind == "ucie_transaction") {
+            const auto& link = sys_->ucie_link(segment.resource_ref);
+            const auto operation = segment.operation == "read"
+                ? MemoryOperation::Read
+                : MemoryOperation::Write;
+            hop_count = ucie_transaction_hops(
+                operation, active.bytes, link.header_bytes).size();
+        }
+        if (hop_index + 1 < hop_count) {
+            start_segment_hop(event_id, segment_index, hop_index + 1);
+            return;
+        }
+        if (!submission.active_segment_ready_ns.has_value() ||
+            !submission.active_segment_start_ns.has_value()) {
+            throw std::logic_error("movement segment timing was not initialized");
+        }
+        submission.segment_timings.push_back(
+            {segment.id,
+             segment.kind,
+             segment.resource_ref,
+             segment.operation,
+             active.bytes,
+             submission.active_segment_billed_bytes,
+             *submission.active_segment_ready_ns,
+             *submission.active_segment_start_ns,
+             Sys::boostedTick(),
+             submission.active_segment_queue_wait_ns,
+             submission.active_segment_service_ns});
+        ++submission.next_segment_index;
+        start_next_segment(event_id);
     }
 }
 

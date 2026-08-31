@@ -198,6 +198,267 @@ std::vector<UcieLinkConfig> parse_ucie_links(
     return links;
 }
 
+uint32_t home_domain_count(const json& payload) {
+    if (!payload.contains("home_domain_topology") ||
+        !payload["home_domain_topology"].is_object() ||
+        !payload["home_domain_topology"].contains("domains") ||
+        !payload["home_domain_topology"]["domains"].is_array() ||
+        payload["home_domain_topology"]["domains"].empty()) {
+        throw std::invalid_argument(
+            "movement_paths require non-empty home_domain_topology.domains");
+    }
+    const auto count =
+        payload["home_domain_topology"]["domains"].size();
+    if (count > UINT32_MAX) {
+        throw std::invalid_argument("home domain count exceeds uint32");
+    }
+    return static_cast<uint32_t>(count);
+}
+
+void validate_closed(const json& raw,
+                     const std::unordered_set<std::string>& allowed,
+                     const std::string& context) {
+    if (!raw.is_object()) {
+        throw std::invalid_argument(context + " must be an object");
+    }
+    for (const auto& [key, value] : raw.items()) {
+        (void)value;
+        if (!allowed.count(key)) {
+            throw std::invalid_argument(
+                context + " has unknown field '" + key + "'");
+        }
+    }
+}
+
+std::string required_string(const json& raw,
+                            const std::string& field,
+                            const std::string& context) {
+    if (!raw.contains(field) || !raw[field].is_string() ||
+        raw[field].get<std::string>().empty()) {
+        throw std::invalid_argument(
+            context + "." + field + " must be a non-empty string");
+    }
+    return raw[field].get<std::string>();
+}
+
+uint32_t required_positive_uint32(const json& raw,
+                                  const std::string& field,
+                                  const std::string& context) {
+    if (!raw.contains(field) || !raw[field].is_number_unsigned() ||
+        raw[field].get<uint64_t>() == 0 ||
+        raw[field].get<uint64_t>() > UINT32_MAX) {
+        throw std::invalid_argument(
+            context + "." + field + " must be a positive uint32");
+    }
+    return raw[field].get<uint32_t>();
+}
+
+struct ParsedMovementPaths {
+    bool present = false;
+    std::string selected_id;
+    std::vector<MovementPathCapabilityConfig> capabilities;
+    std::vector<MovementBandwidthResourceConfig> resources;
+};
+
+ParsedMovementPaths parse_movement_paths(
+    const json& payload,
+    const std::vector<UcieLinkConfig>& ucie_links) {
+    if (!payload.contains("movement_paths")) {
+        return {};
+    }
+    const auto& raw = payload["movement_paths"];
+    const std::string root = "movement_paths";
+    validate_closed(
+        raw,
+        {"schema_version", "selection_mode", "selected_capability_id",
+         "capabilities", "bandwidth_resources"},
+        root);
+    if (raw.value("schema_version", "") != "movement-path-v1") {
+        throw std::invalid_argument(
+            "movement_paths.schema_version must be movement-path-v1");
+    }
+    if (raw.value("selection_mode", "") != "fixed") {
+        throw std::invalid_argument(
+            "movement_paths.selection_mode must be fixed");
+    }
+    const auto selected =
+        required_string(raw, "selected_capability_id", root);
+    if (!raw.contains("bandwidth_resources") ||
+        !raw["bandwidth_resources"].is_array() ||
+        raw["bandwidth_resources"].empty()) {
+        throw std::invalid_argument(
+            "movement_paths.bandwidth_resources must be non-empty");
+    }
+    const uint32_t domains = home_domain_count(payload);
+    std::vector<MovementBandwidthResourceConfig> resources;
+    std::unordered_set<std::string> resource_ids;
+    for (std::size_t index = 0;
+         index < raw["bandwidth_resources"].size(); ++index) {
+        const auto context = "movement_paths.bandwidth_resources[" +
+            std::to_string(index) + "]";
+        const auto& item = raw["bandwidth_resources"][index];
+        validate_closed(
+            item,
+            {"id", "stack_count", "latency_ns", "bandwidth_resource"},
+            context);
+        const auto id = required_string(item, "id", context);
+        if (!std::regex_match(id, kTierName) ||
+            !resource_ids.insert(id).second) {
+            throw std::invalid_argument(
+                context + ".id is invalid or duplicate");
+        }
+        const auto stacks =
+            required_positive_uint32(item, "stack_count", context);
+        if (stacks != domains) {
+            throw std::invalid_argument(
+                context + ".stack_count must equal home domain count");
+        }
+        if (!item.contains("latency_ns") ||
+            !item["latency_ns"].is_number_unsigned()) {
+            throw std::invalid_argument(
+                context + ".latency_ns must be non-negative");
+        }
+        if (!item.contains("bandwidth_resource")) {
+            throw std::invalid_argument(
+                context + " must declare bandwidth_resource");
+        }
+        json backend = {
+            {"memory-type", "MEMORY_POOL"},
+            {"memory-location", "REMOTE_MEMORY"},
+            {"mem-latency", item["latency_ns"]},
+            {"num-devices", stacks},
+            {"bandwidth-resource", item["bandwidth_resource"]},
+        };
+        parse_bandwidth_resource_config(
+            item["bandwidth_resource"],
+            context + ".bandwidth_resource");
+        resources.push_back(
+            {id, stacks, item["latency_ns"].get<uint64_t>(),
+             std::move(backend)});
+    }
+    std::unordered_set<std::string> ucie_ids;
+    for (const auto& link : ucie_links) {
+        ucie_ids.insert(link.id);
+    }
+    if (!raw.contains("capabilities") ||
+        !raw["capabilities"].is_array() || raw["capabilities"].empty()) {
+        throw std::invalid_argument(
+            "movement_paths.capabilities must be non-empty");
+    }
+    std::vector<MovementPathCapabilityConfig> capabilities;
+    std::unordered_set<std::string> capability_ids;
+    for (std::size_t index = 0; index < raw["capabilities"].size(); ++index) {
+        const auto context = "movement_paths.capabilities[" +
+            std::to_string(index) + "]";
+        const auto& item = raw["capabilities"][index];
+        validate_closed(
+            item,
+            {"id", "engine_location", "engine_count",
+             "max_priority_burst", "max_in_flight_page_movements",
+             "timing_provenance", "segments"},
+            context);
+        const auto id = required_string(item, "id", context);
+        if ((id != "base_die_local" && id != "gpu_routed") ||
+            !capability_ids.insert(id).second) {
+            throw std::invalid_argument(
+                context + ".id is unsupported or duplicate");
+        }
+        const auto expected_location =
+            id == "base_die_local" ? "base_die" : "gpu";
+        if (required_string(item, "engine_location", context) !=
+            expected_location) {
+            throw std::invalid_argument(
+                context + ".engine_location does not match path");
+        }
+        const auto engine_count =
+            required_positive_uint32(item, "engine_count", context);
+        const auto max_priority_burst =
+            required_positive_uint32(item, "max_priority_burst", context);
+        const auto max_in_flight = required_positive_uint32(
+            item, "max_in_flight_page_movements", context);
+        if (max_in_flight > engine_count) {
+            throw std::invalid_argument(
+                context + ".max_in_flight_page_movements exceeds engine_count");
+        }
+        const auto provenance =
+            required_string(item, "timing_provenance", context);
+        if (provenance != "estimated" && provenance != "measured") {
+            throw std::invalid_argument(
+                context + ".timing_provenance is unsupported");
+        }
+        if (!item.contains("segments") || !item["segments"].is_array() ||
+            item["segments"].empty()) {
+            throw std::invalid_argument(context + ".segments must be non-empty");
+        }
+        std::vector<MovementPathSegmentConfig> segments;
+        std::unordered_set<std::string> segment_ids;
+        for (std::size_t segment_index = 0;
+             segment_index < item["segments"].size(); ++segment_index) {
+            const auto segment_context = context + ".segments[" +
+                std::to_string(segment_index) + "]";
+            const auto& segment = item["segments"][segment_index];
+            validate_closed(
+                segment,
+                {"id", "kind", "resource_ref", "operation", "byte_rule"},
+                segment_context);
+            const auto segment_id =
+                required_string(segment, "id", segment_context);
+            if (!segment_ids.insert(segment_id).second) {
+                throw std::invalid_argument(
+                    context + ".segments IDs must be unique");
+            }
+            const auto kind =
+                required_string(segment, "kind", segment_context);
+            const auto resource_ref =
+                required_string(segment, "resource_ref", segment_context);
+            const auto operation =
+                required_string(segment, "operation", segment_context);
+            if ((kind != "bandwidth_resource" &&
+                 kind != "ucie_transaction") ||
+                (operation != "read" && operation != "write") ||
+                segment.value("byte_rule", "") != "payload") {
+                throw std::invalid_argument(
+                    segment_context + " has unsupported segment semantics");
+            }
+            if ((kind == "bandwidth_resource" &&
+                 !resource_ids.count(resource_ref)) ||
+                (kind == "ucie_transaction" &&
+                 !ucie_ids.count(resource_ref))) {
+                throw std::invalid_argument(
+                    segment_context + " references an unknown resource");
+            }
+            segments.push_back(
+                {segment_id, kind, resource_ref, operation, "payload"});
+        }
+        const bool valid_base = id == "base_die_local" &&
+            segments.size() == 2 &&
+            segments[0].kind == "bandwidth_resource" &&
+            segments[0].operation == "read" &&
+            segments[1].kind == "bandwidth_resource" &&
+            segments[1].operation == "write";
+        const bool valid_gpu = id == "gpu_routed" &&
+            segments.size() == 3 &&
+            segments[0].kind == "ucie_transaction" &&
+            segments[0].operation == "read" &&
+            segments[1].kind == "bandwidth_resource" &&
+            segments[1].operation == "write" &&
+            segments[2].kind == "ucie_transaction" &&
+            segments[2].operation == "write";
+        if (!valid_base && !valid_gpu) {
+            throw std::invalid_argument(
+                context + " does not match its required path shape");
+        }
+        capabilities.push_back(
+            {id, expected_location, engine_count, max_priority_burst,
+             max_in_flight, provenance, std::move(segments)});
+    }
+    if (!capability_ids.count(selected)) {
+        throw std::invalid_argument(
+            "selected movement path is not a declared capability");
+    }
+    return {true, selected, std::move(capabilities), std::move(resources)};
+}
+
 }  // namespace
 
 MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
@@ -311,9 +572,18 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
                 raw["num_devices"].get<uint32_t>(),
                 std::move(backend)});
         }
+        auto ucie_links = parse_ucie_links(payload, devices_by_name);
+        auto movement_paths = parse_movement_paths(payload, ucie_links);
         return {
-            true, digest, std::move(tiers),
-            parse_ucie_links(payload, devices_by_name)};
+            true,
+            digest,
+            std::move(tiers),
+            std::move(ucie_links),
+            movement_paths.present,
+            std::move(movement_paths.selected_id),
+            std::move(movement_paths.capabilities),
+            std::move(movement_paths.resources),
+        };
     }
 
     std::vector<MemoryTierConfig> tiers;
@@ -361,7 +631,7 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
         throw std::invalid_argument(
             "legacy memory configuration cannot declare ucie_links");
     }
-    return {false, "", std::move(tiers)};
+    return {false, "", std::move(tiers), {}, false, "", {}, {}};
 }
 
 MemoryTierConfigSet load_memory_tier_config(const std::string& path) {

@@ -151,9 +151,11 @@ Sys::Sys(int id,
          double injection_scale,
          double comm_scale,
          bool rendezvous_enabled,
-         UcieLinkRegistry ucie_link_registry)
+         UcieLinkRegistry ucie_link_registry,
+         MovementPathRegistry movement_path_registry)
     : memory_tiers(memory_tier_bindings),
       ucie_links(std::move(ucie_link_registry)),
+      movement_paths(std::move(movement_path_registry)),
       tier_manifest_digest(std::move(tier_manifest_digest)) {
     if ((id + 1) > this->all_sys.size()) {
         this->all_sys.resize(id + 1);
@@ -174,6 +176,10 @@ Sys::Sys(int id,
     }
     for (const auto& [link_id, binding] : ucie_links.all()) {
         (void)link_id;
+        binding.api->set_sys(id, this);
+    }
+    for (const auto& [resource_id, binding] : movement_paths.resources()) {
+        (void)resource_id;
         binding.api->set_sys(id, this);
     }
 
@@ -285,6 +291,11 @@ AstraMemoryAPI* Sys::memory_api(
 
 const UcieLinkBinding& Sys::ucie_link(const std::string& link_id) const {
     return ucie_links.at(link_id);
+}
+
+const MovementBandwidthBinding& Sys::movement_resource(
+    const std::string& resource_id) const {
+    return movement_paths.resource(resource_id);
 }
 
 void Sys::validate_tier_manifest_digest(

@@ -30,11 +30,41 @@ struct UcieLinkConfig {
     nlohmann::json backend_config;
 };
 
+struct MovementBandwidthResourceConfig {
+    std::string id;
+    uint32_t stack_count;
+    uint64_t latency_ns;
+    nlohmann::json backend_config;
+};
+
+struct MovementPathSegmentConfig {
+    std::string id;
+    std::string kind;
+    std::string resource_ref;
+    std::string operation;
+    std::string byte_rule;
+};
+
+struct MovementPathCapabilityConfig {
+    std::string id;
+    std::string engine_location;
+    uint32_t engine_count;
+    uint32_t max_priority_burst;
+    uint32_t max_in_flight_page_movements;
+    std::string timing_provenance;
+    std::vector<MovementPathSegmentConfig> segments;
+};
+
 struct MemoryTierConfigSet {
     bool native;
     std::string manifest_digest;
     std::vector<MemoryTierConfig> tiers;
     std::vector<UcieLinkConfig> ucie_links;
+    bool has_movement_paths = false;
+    std::string selected_movement_path_id;
+    std::vector<MovementPathCapabilityConfig> movement_path_capabilities;
+    std::vector<MovementBandwidthResourceConfig>
+        movement_bandwidth_resources;
 };
 
 MemoryTierConfigSet parse_memory_tier_config(const nlohmann::json& payload);

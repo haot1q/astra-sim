@@ -19,15 +19,6 @@ bool is_supported_path(const std::string& path_id) {
     return path_id == "base_die_local" || path_id == "gpu_routed";
 }
 
-const std::vector<std::string>& required_resources(const std::string& path_id) {
-    static const std::vector<std::string> base_die_local = {
-        "lpddr_read", "base_die_dma", "local_stack_fabric", "hbm_write"};
-    static const std::vector<std::string> gpu_routed = {
-        "lpddr_read", "base_to_gpu_link", "gpu_dma", "gpu_to_base_link",
-        "hbm_write"};
-    return path_id == "base_die_local" ? base_die_local : gpu_routed;
-}
-
 bool is_high_priority(DmaPriorityClass priority) {
     return priority == DmaPriorityClass::DecodeCritical ||
            priority == DmaPriorityClass::PrefillCritical ||
@@ -79,17 +70,6 @@ void DmaScheduler::submit(DmaJob job) {
         if (resource.empty() || !unique_resources.insert(resource).second) {
             throw std::invalid_argument(
                 "DMA path resources must be non-empty and unique");
-        }
-    }
-    for (const auto& required : required_resources(job.path_id)) {
-        const bool present =
-            std::any_of(job.resource_ids.begin(), job.resource_ids.end(),
-                        [&required](const std::string& resource) {
-                            return resource.find(required) != std::string::npos;
-                        });
-        if (!present) {
-            throw std::invalid_argument(
-                "DMA path is missing required resource '" + required + "'");
         }
     }
     for (const auto& dependency : job.dependencies) {
