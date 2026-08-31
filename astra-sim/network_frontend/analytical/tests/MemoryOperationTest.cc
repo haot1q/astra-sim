@@ -3,11 +3,14 @@ This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "extern/memory_backend/analytical/AnalyticalMemory.hh"
 #include "astra-sim/workload/Workload.hh"
@@ -87,6 +90,39 @@ bool per_device_queue_contract() {
            stack0_write != stack1_write && stack1_read != stack1_write;
 }
 
+uint64_t concurrent_read_makespan_ns(
+    const Analytical::AnalyticalMemory& memory,
+    const std::vector<uint32_t>& device_ids,
+    uint64_t bytes) {
+    using Analytical::AnalyticalMemoryTestAccess;
+    using AstraSim::MemoryOperation;
+    using AstraSim::MemoryRequest;
+    std::map<std::size_t, uint64_t> queue_finish_ns;
+    for (const auto device_id : device_ids) {
+        const auto queue = AnalyticalMemoryTestAccess::queue_index(
+            memory, device_id, MemoryOperation::Read);
+        queue_finish_ns[queue] +=
+            memory.get_mem_runtime({bytes, MemoryOperation::Read});
+    }
+    uint64_t makespan_ns = 0;
+    for (const auto& [queue, finish_ns] : queue_finish_ns) {
+        (void)queue;
+        makespan_ns = std::max(makespan_ns, finish_ns);
+    }
+    return makespan_ns;
+}
+
+bool same_stack_contention_is_slower_than_spread_contract() {
+    const auto path = write_memory_config("simultaneous");
+    const Analytical::AnalyticalMemory memory(path);
+    std::remove(path.c_str());
+    const uint64_t bytes = 2 * 1024 * 1024;
+    const auto same_stack_ns =
+        concurrent_read_makespan_ns(memory, {0, 0}, bytes);
+    const auto spread_ns = concurrent_read_makespan_ns(memory, {0, 1}, bytes);
+    return same_stack_ns == 2 * spread_ns;
+}
+
 bool contract_holds() {
     using AstraSim::MemoryOperation;
     using AstraSim::memory_operation_for_node_type;
@@ -110,5 +146,8 @@ bool contract_holds() {
 }  // namespace
 
 int main() {
-    return contract_holds() && per_device_queue_contract() ? 0 : 1;
+    return contract_holds() && per_device_queue_contract() &&
+                   same_stack_contention_is_slower_than_spread_contract()
+               ? 0
+               : 1;
 }
