@@ -23,6 +23,9 @@ class WorkloadLayerHandlerData : public BasicEventHandlerData, public MetaData {
     uint64_t node_id;
     uint32_t device_id;
     MemoryOperation memory_operation;
+    uint64_t memory_ready_ns;
+    uint64_t memory_start_ns;
+    uint64_t memory_finish_ns;
     bool pim_enabled;
     uint32_t pim_channel_id;
     uint64_t pim_runtime;

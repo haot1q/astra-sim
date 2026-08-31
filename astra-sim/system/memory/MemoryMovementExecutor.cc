@@ -32,8 +32,22 @@ using json = nlohmann::json;
 class MovementHandlerData : public WorkloadLayerHandlerData {
   public:
     std::string event_id;
+    uint32_t tier_id = 0;
     bool source_read = true;
 };
+
+json endpoint_timing_json(const MemoryEndpointTiming& timing) {
+    return {
+        {"tier_id", timing.tier_id},
+        {"device_id", timing.device_id},
+        {"operation", timing.operation},
+        {"ready_ns", timing.ready_ns},
+        {"start_ns", timing.start_ns},
+        {"finish_ns", timing.finish_ns},
+        {"queue_wait_ns", timing.start_ns - timing.ready_ns},
+        {"service_ns", timing.finish_ns - timing.start_ns},
+    };
+}
 
 const AttributeProto& required_attr(const std::shared_ptr<ETFeederNode>& node,
                                     const std::string& name) {
@@ -85,7 +99,10 @@ json receipt_json(const DmaReceipt& receipt,
                   const std::optional<uint64_t>& exposed_to_dependent_ns,
                   const std::optional<std::string>& page_id,
                   const std::optional<std::string>& transaction_id,
-                  const std::optional<uint32_t>& expected_residency_version) {
+                  const std::optional<uint32_t>& expected_residency_version,
+                  const std::optional<uint32_t>& home_domain_id,
+                  const MemoryEndpointTiming& source_endpoint,
+                  const MemoryEndpointTiming& destination_endpoint) {
     json payload = {
         {"schema_version", kMemoryMovementReceiptSchemaVersion},
         {"run_id", run_id},
@@ -116,12 +133,16 @@ json receipt_json(const DmaReceipt& receipt,
                                         ? json(*exposed_to_dependent_ns)
                                         : json(nullptr)},
         {"status", "completed"},
+        {"endpoint_timings",
+         json::array({endpoint_timing_json(source_endpoint),
+                      endpoint_timing_json(destination_endpoint)})},
     };
     if (page_id.has_value()) {
         payload["page_id"] = *page_id;
         payload["transaction_id"] = *transaction_id;
         payload["expected_residency_version"] =
             *expected_residency_version;
+        payload["home_domain_id"] = *home_domain_id;
     }
     return payload;
 }
@@ -204,14 +225,17 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
     std::optional<std::string> page_id;
     std::optional<std::string> transaction_id;
     std::optional<uint32_t> expected_residency_version;
+    std::optional<uint32_t> home_domain_id;
     if (page_movement) {
         page_id = string_attr(node, "movement_page_id");
         transaction_id = string_attr(node, "movement_transaction_id");
         expected_residency_version =
             uint32_attr(node, "movement_expected_residency_version");
+        home_domain_id = uint32_attr(node, "movement_home_domain_id");
     } else if (node->has_other_attr("movement_page_id") ||
                node->has_other_attr("movement_transaction_id") ||
-               node->has_other_attr("movement_expected_residency_version")) {
+               node->has_other_attr("movement_expected_residency_version") ||
+               node->has_other_attr("movement_home_domain_id")) {
         throw std::invalid_argument(
             "non-page movement must not carry page identity");
     }
@@ -263,6 +287,12 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
         foreground,
         page_movement,
     };
+    if (page_movement &&
+        (*home_domain_id != job.source_device_id ||
+         *home_domain_id != job.destination_device_id)) {
+        throw std::invalid_argument(
+            "movement home_domain_id must match paired device IDs");
+    }
     scheduler_->submit(std::move(job));
     const auto inserted = submissions_.emplace(
         event_id, Submission{
@@ -275,6 +305,9 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
                       page_id,
                       transaction_id,
                       expected_residency_version,
+                      home_domain_id,
+                      std::nullopt,
+                      std::nullopt,
                   });
     if (!inserted.second) {
         throw std::invalid_argument("duplicate movement submission context");
@@ -298,6 +331,7 @@ void MemoryMovementExecutor::start_source_read(const DmaDispatch& dispatch) {
     data->sys_id = sys_->id;
     data->completion_target = this;
     data->event_id = dispatch.job.event_id;
+    data->tier_id = dispatch.job.source_tier_id;
     data->device_id = dispatch.job.source_device_id;
     data->source_read = true;
     try {
@@ -319,6 +353,7 @@ void MemoryMovementExecutor::start_destination_write(
     data->sys_id = sys_->id;
     data->completion_target = this;
     data->event_id = event_id;
+    data->tier_id = active.destination_tier_id;
     data->device_id = active.destination_device_id;
     data->source_read = false;
     try {
@@ -335,6 +370,11 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
     const DmaReceipt receipt =
         scheduler_->complete(event_id, Sys::boostedTick());
     const Submission submission = submissions_.at(event_id);
+    if (!submission.source_endpoint.has_value() ||
+        !submission.destination_endpoint.has_value()) {
+        throw std::logic_error(
+            "movement completed without both endpoint timings");
+    }
     const uint64_t overlap_compute_ns =
         compute_overlap_ns(receipt.start_ns, receipt.finish_ns);
     const uint64_t overlap_compute_bytes = time_proportional_bytes(
@@ -351,7 +391,10 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
                      overlap_compute_ns, overlap_compute_bytes,
                      exposed_to_dependent_ns, submission.page_id,
                      submission.transaction_id,
-                     submission.expected_residency_version)
+                     submission.expected_residency_version,
+                     submission.home_domain_id,
+                     *submission.source_endpoint,
+                     *submission.destination_endpoint)
             .dump());
     submissions_.erase(event_id);
     if (submission.foreground) {
@@ -371,6 +414,26 @@ void MemoryMovementExecutor::call(EventType type, CallData* data) {
     auto* movement = static_cast<MovementHandlerData*>(data);
     const std::string event_id = movement->event_id;
     const bool source_read = movement->source_read;
+    if (!(movement->memory_ready_ns <= movement->memory_start_ns &&
+          movement->memory_start_ns <= movement->memory_finish_ns &&
+          movement->memory_finish_ns == Sys::boostedTick())) {
+        delete movement;
+        throw std::logic_error("invalid analytical memory endpoint timing");
+    }
+    const MemoryEndpointTiming timing{
+        movement->tier_id,
+        movement->device_id,
+        source_read ? "read" : "write",
+        movement->memory_ready_ns,
+        movement->memory_start_ns,
+        movement->memory_finish_ns,
+    };
+    auto& submission = submissions_.at(event_id);
+    if (source_read) {
+        submission.source_endpoint = timing;
+    } else {
+        submission.destination_endpoint = timing;
+    }
     delete movement;
     if (source_read) {
         start_destination_write(event_id);

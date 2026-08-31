@@ -26,6 +26,15 @@ namespace AstraSim {
 class Sys;
 class Workload;
 
+struct MemoryEndpointTiming {
+    uint32_t tier_id;
+    uint32_t device_id;
+    std::string operation;
+    uint64_t ready_ns;
+    uint64_t start_ns;
+    uint64_t finish_ns;
+};
+
 class MemoryMovementExecutor : public Callable {
   public:
     explicit MemoryMovementExecutor(Sys* sys);
@@ -51,6 +60,9 @@ class MemoryMovementExecutor : public Callable {
         std::optional<std::string> page_id;
         std::optional<std::string> transaction_id;
         std::optional<uint32_t> expected_residency_version;
+        std::optional<uint32_t> home_domain_id;
+        std::optional<MemoryEndpointTiming> source_endpoint;
+        std::optional<MemoryEndpointTiming> destination_endpoint;
     };
 
     void start_source_read(const DmaDispatch& dispatch);
