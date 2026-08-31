@@ -13,6 +13,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/WorkloadLayerHandlerData.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
+#include "astra-sim/system/memory/UcieTransport.hh"
 #include <json/json.hpp>
 
 #include <algorithm>
@@ -321,8 +322,12 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
         exit(EXIT_FAILURE);
     }
     try {
-        sys->memory_api(node->tensor_loc(), node->tensor_device())
-            ->issue({node->tensor_size(), operation}, wlhd);
+        if (node_requests_ucie_transport(node)) {
+            issue_ucie_mem(sys, node, wlhd, operation);
+        } else {
+            sys->memory_api(node->tensor_loc(), node->tensor_device())
+                ->issue({node->tensor_size(), operation}, wlhd);
+        }
     } catch (const std::exception& error) {
         LoggerFactory::get_logger("workload")->critical(
             "Memory dispatch failed for workload node {}, tier_id {}, "

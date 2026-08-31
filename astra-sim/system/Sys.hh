@@ -16,6 +16,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CommunicatorGroup.hh"
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MemoryTierRegistry.hh"
+#include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/Roofline.hh"
 #include "astra-sim/system/UsageTracker.hh"
 #include "astra-sim/system/topology/RingTopology.hh"
@@ -76,7 +77,8 @@ class Sys : public Callable {
         std::vector<int> queues_per_dim,
         double injection_scale,
         double comm_scale,
-        bool rendezvous_enabled);
+        bool rendezvous_enabled,
+        UcieLinkRegistry ucie_links = UcieLinkRegistry());
     ~Sys();
     //---------------------------------------------------------------------------
 
@@ -268,7 +270,9 @@ class Sys : public Callable {
     // memory
     double local_mem_bw;
     MemoryTierRegistry memory_tiers;
+    UcieLinkRegistry ucie_links;
     std::string tier_manifest_digest;
+    const UcieLinkBinding& ucie_link(const std::string& link_id) const;
     std::unique_ptr<MemoryMovementExecutor> memory_movement_executor;
 
     // memory bus

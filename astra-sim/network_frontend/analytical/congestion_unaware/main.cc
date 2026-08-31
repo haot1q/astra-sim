@@ -11,6 +11,7 @@ LICENSE file in the root directory of this source tree.
 #include <astra-network-analytical/congestion_unaware/Helper.h>
 #include <memory_backend/analytical/AnalyticalMemory.hh>
 #include "astra-sim/system/MemoryTierConfig.hh"
+#include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -94,6 +95,17 @@ int main(int argc, char* argv[]) {
           {tier.tier_id, tier.tier_name, tier.num_devices,
            memory_levels.back().get()});
     }
+    auto ucie_bindings = std::vector<UcieLinkBinding>();
+    for (const auto& link : memory_config.ucie_links) {
+      const auto path = write_temporary_memory_backend_config(
+          link.backend_config);
+      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
+      std::remove(path.c_str());
+      ucie_bindings.push_back(
+          {link.id, link.stack_count, link.header_bytes, link.latency_ns,
+           memory_levels.back().get()});
+    }
+    const auto ucie_links = UcieLinkRegistry(std::move(ucie_bindings));
 
     auto systems = std::vector<Sys*>();
 
@@ -110,7 +122,7 @@ int main(int argc, char* argv[]) {
                     system_configuration, memory_tiers,
                     memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
-                    comm_scale, rendezvous_protocol);
+                    comm_scale, rendezvous_protocol, ucie_links);
 
         // push back network and system
         network_apis.push_back(std::move(network_api));
