@@ -14,6 +14,7 @@ RecvPacketEventHandlerData::RecvPacketEventHandlerData() {
     this->wlhd = nullptr;
     this->owner = nullptr;
     this->chakra = nullptr;
+    this->callable = nullptr;
 }
 
 RecvPacketEventHandlerData::RecvPacketEventHandlerData(
@@ -23,6 +24,7 @@ RecvPacketEventHandlerData::RecvPacketEventHandlerData(
     this->wlhd = nullptr;
     this->owner = owner;
     this->chakra = nullptr;
+    this->callable = nullptr;
     this->vnet = vnet;
     this->stream_id = stream_id;
     this->message_end = true;

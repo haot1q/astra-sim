@@ -702,6 +702,9 @@ void Sys::handleEvent(void* arg) {
         if (rcehd->chakra) {
             rcehd->chakra->call(event, rcehd->wlhd);
         }
+        if (rcehd->callable) {
+            rcehd->callable->call(event, rcehd->wlhd);
+        }
         delete rcehd;
     } else if (event == EventType::PacketSent) {
         SendPacketEventHandlerData* sehd = (SendPacketEventHandlerData*)ehd;

@@ -13,6 +13,7 @@ LICENSE file in the root directory of this source tree.
 namespace AstraSim {
 
 class WorkloadLayerHandlerData;
+class Callable;
 
 class RecvPacketEventHandlerData : public BasicEventHandlerData {
   public:
@@ -27,6 +28,7 @@ class RecvPacketEventHandlerData : public BasicEventHandlerData {
     WorkloadLayerHandlerData* wlhd;
     BaseStream* owner;
     ChakraImpl* chakra;
+    Callable* callable;
     int vnet;
     int stream_id;
     bool message_end;

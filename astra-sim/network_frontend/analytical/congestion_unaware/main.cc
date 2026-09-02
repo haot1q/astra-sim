@@ -13,9 +13,11 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MemoryTierConfig.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
+#include "astra-sim/system/PdKvTransferExecutor.hh"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 using namespace AstraSim;
@@ -147,6 +149,23 @@ int main(int argc, char* argv[]) {
         network_apis.push_back(std::move(network_api));
         systems.push_back(system);
     }
+    PdKvTransferExecutor pd_kv_executor(systems);
+    const auto submit_pd_kv = [&pd_kv_executor](const std::string& command) {
+      constexpr const char* prefix = "pd-kv-transfer\t";
+      if (command.rfind(prefix, 0) != 0) {
+        return false;
+      }
+      std::istringstream fields(command.substr(std::char_traits<char>::length(prefix)));
+      std::string descriptor_path;
+      std::string ready_text;
+      if (!std::getline(fields, descriptor_path, '\t') ||
+          !std::getline(fields, ready_text) || descriptor_path.empty() ||
+          ready_text.empty()) {
+        throw std::runtime_error("malformed pd-kv-transfer command");
+      }
+      pd_kv_executor.submit(descriptor_path, std::stoull(ready_text));
+      return true;
+    };
 
     // Map instance NPU IDs for proper workload management
     // Precompute the systems handled by each controller NPU
@@ -262,8 +281,8 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
-    const auto all_systems_drained = [&systems]() {
-      return std::all_of(
+    const auto all_systems_drained = [&systems, &pd_kv_executor]() {
+      return pd_kv_executor.drained() && std::all_of(
           systems.begin(), systems.end(), [](const Sys* system) {
             return system->workload->is_finished &&
                 system->memory_movement_drained();
@@ -359,7 +378,7 @@ int main(int argc, char* argv[]) {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
           }
-          else {
+          else if (!submit_pd_kv(new_filename)) {
             // Add new workload to this system
             systems[npu_id]->workload
                 ->add_workload(new_filename, {});
@@ -442,7 +461,7 @@ int main(int argc, char* argv[]) {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
           }
-          else {
+          else if (!submit_pd_kv(new_filename)) {
             // Add new workload to the systems handled by this npu
             systems[npu_id]->workload
                 ->add_workload(new_filename, managed_systems[idx]);
@@ -467,7 +486,8 @@ int main(int argc, char* argv[]) {
     for (int npu_id = 0; npu_id < npus_count; npu_id++) {
 
       if (!systems[npu_id]->workload->is_finished ||
-          !systems[npu_id]->memory_movement_drained()) {
+          !systems[npu_id]->memory_movement_drained() ||
+          !pd_kv_executor.drained()) {
         cout << "sys[" << npu_id << "] " << endl;
         systems[npu_id]->workload->et_feeder->printGraph();
         done = false;
