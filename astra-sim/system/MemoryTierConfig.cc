@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MemoryTierConfig.hh"
 
 #include "astra-sim/system/memory/BandwidthResource.hh"
+#include "astra-sim/system/memory/ServiceBindingJson.hh"
 
 #include <cstdio>
 #include <filesystem>
@@ -583,6 +584,7 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
             std::move(movement_paths.selected_id),
             std::move(movement_paths.capabilities),
             std::move(movement_paths.resources),
+            payload,
         };
     }
 
@@ -635,13 +637,9 @@ MemoryTierConfigSet parse_memory_tier_config(const json& payload) {
 }
 
 MemoryTierConfigSet load_memory_tier_config(const std::string& path) {
-    std::ifstream input(path);
-    if (!input) {
-        throw std::invalid_argument("unable to open memory configuration " + path);
-    }
     json payload;
     try {
-        input >> payload;
+        payload = ServiceBindingJson::read(path);
     } catch (const json::exception& error) {
         throw std::invalid_argument(
             "unable to parse memory configuration " + path + ": " + error.what());

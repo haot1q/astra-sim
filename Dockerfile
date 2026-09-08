@@ -18,7 +18,7 @@ RUN apt -y update
 RUN apt -y install \
     coreutils wget vim git \
     gcc g++ clang-format \
-    make cmake \
+    make cmake libssl-dev \
     libboost-dev libboost-program-options-dev \
     openmpi-bin openmpi-doc libopenmpi-dev \
     python3.11 python3-pip python3-venv \

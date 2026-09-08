@@ -6,6 +6,8 @@ LICENSE file in the root directory of this source tree.
 #ifndef __WORKLOAD_LAYER_HANDLER_DATA_HH__
 #define __WORKLOAD_LAYER_HANDLER_DATA_HH__
 
+#include <optional>
+
 #include "astra-sim/common/AstraNetworkAPI.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/BasicEventHandlerData.hh"
@@ -22,6 +24,8 @@ class WorkloadLayerHandlerData : public BasicEventHandlerData, public MetaData {
     Callable* completion_target;
     uint64_t node_id;
     uint32_t device_id;
+    // Backend-private queue slot. Never replaces the logical device in receipts.
+    std::optional<uint32_t> service_device_id = std::nullopt;
     MemoryOperation memory_operation;
     uint64_t memory_ready_ns;
     uint64_t memory_start_ns;

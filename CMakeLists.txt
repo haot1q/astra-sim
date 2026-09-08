@@ -61,6 +61,10 @@ file(GLOB srcs
 # Compile AstraSim Library
 add_library(AstraSim STATIC ${srcs})
 
+# Native deployment/ET consistency requires independent content hashing.
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
+target_link_libraries(AstraSim PUBLIC OpenSSL::Crypto)
+
 # Link libraries
 target_link_libraries(AstraSim PUBLIC fmt::fmt)
 target_link_libraries(AstraSim PUBLIC spdlog::spdlog)

@@ -101,6 +101,7 @@ class Sys : public Callable {
         MemoryTierId tier_id, uint32_t device_id) const;
     void validate_tier_manifest_digest(
         const std::string& et_manifest_digest) const;
+    void validate_service_metadata(const Chakra::ETFeeder& feeder) const;
     bool memory_movement_drained() const;
     //---------------------------------------------------------------------------
 
@@ -275,6 +276,7 @@ class Sys : public Callable {
     UcieLinkRegistry ucie_links;
     MovementPathRegistry movement_paths;
     std::string tier_manifest_digest;
+    ServiceBindingIdentity service_binding_identity;
     const UcieLinkBinding& ucie_link(const std::string& link_id) const;
     const MovementBandwidthBinding& movement_resource(
         const std::string& resource_id) const;

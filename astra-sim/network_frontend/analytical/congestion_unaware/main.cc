@@ -11,6 +11,7 @@ LICENSE file in the root directory of this source tree.
 #include <astra-network-analytical/congestion_unaware/Helper.h>
 #include <memory_backend/analytical/AnalyticalMemory.hh>
 #include "astra-sim/system/MemoryTierConfig.hh"
+#include "astra-sim/system/memory/PhysicalServiceFactory.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/PdKvTransferExecutor.hh"
@@ -86,46 +87,9 @@ int main(int argc, char* argv[]) {
     auto network_apis =
         std::vector<std::unique_ptr<CongestionUnawareNetworkApi>>();
 
-    std::vector<std::unique_ptr<AnalyticalMemory>> memory_levels;
     const auto memory_config = load_memory_tier_config(memory_configuration);
-    auto memory_tiers = std::vector<MemoryTierBinding>();
-    for (const auto& tier : memory_config.tiers) {
-      const auto path = write_temporary_memory_backend_config(
-          tier.backend_config);
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-      std::remove(path.c_str());
-      memory_tiers.push_back(
-          {tier.tier_id, tier.tier_name, tier.num_devices,
-           memory_levels.back().get()});
-    }
-    auto ucie_bindings = std::vector<UcieLinkBinding>();
-    for (const auto& link : memory_config.ucie_links) {
-      const auto path = write_temporary_memory_backend_config(
-          link.backend_config);
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-      std::remove(path.c_str());
-      ucie_bindings.push_back(
-          {link.id, link.stack_count, link.header_bytes, link.latency_ns,
-           memory_levels.back().get()});
-    }
-    const auto ucie_links = UcieLinkRegistry(std::move(ucie_bindings));
-    auto movement_bindings = std::vector<MovementBandwidthBinding>();
-    for (const auto& resource :
-         memory_config.movement_bandwidth_resources) {
-      const auto path = write_temporary_memory_backend_config(
-          resource.backend_config);
-      memory_levels.push_back(std::make_unique<AnalyticalMemory>(path));
-      std::remove(path.c_str());
-      movement_bindings.push_back(
-          {resource.id, resource.stack_count, resource.latency_ns,
-           memory_levels.back().get()});
-    }
-    const auto movement_paths = memory_config.has_movement_paths
-        ? MovementPathRegistry(
-              memory_config.selected_movement_path_id,
-              memory_config.movement_path_capabilities,
-              std::move(movement_bindings))
-        : MovementPathRegistry();
+    PhysicalServiceFactory services(memory_config,
+        cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count);
 
     auto systems = std::vector<Sys*>();
 
@@ -139,11 +103,11 @@ int main(int argc, char* argv[]) {
         auto network_api = std::make_unique<CongestionUnawareNetworkApi>(i);
         auto* const system =
             new Sys(i, workload_configuration, comm_group_configuration,
-                    system_configuration, memory_tiers,
+                    system_configuration, services.at(i).memory,
                     memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
-                    comm_scale, rendezvous_protocol, ucie_links,
-                    movement_paths);
+                    comm_scale, rendezvous_protocol, services.at(i).ucie,
+                    services.at(i).movement);
 
         // push back network and system
         network_apis.push_back(std::move(network_api));
@@ -291,6 +255,7 @@ int main(int argc, char* argv[]) {
     bool exit = false;
     bool exit_requested = false;
     while (!exit) {
+      services.rethrow_failure();
       bool asked_any = false;
       if(!event_queue->finished()){
         event_queue->proceed();
@@ -302,6 +267,7 @@ int main(int argc, char* argv[]) {
         clear_suppression();
       }
 
+      services.rethrow_failure();
       if (exit_requested) {
         exit = all_systems_drained();
         continue;

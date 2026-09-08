@@ -156,7 +156,8 @@ Sys::Sys(int id,
     : memory_tiers(memory_tier_bindings),
       ucie_links(std::move(ucie_link_registry)),
       movement_paths(std::move(movement_path_registry)),
-      tier_manifest_digest(std::move(tier_manifest_digest)) {
+      tier_manifest_digest(std::move(tier_manifest_digest)),
+      service_binding_identity(memory_tiers.service_identity()) {
     if ((id + 1) > this->all_sys.size()) {
         this->all_sys.resize(id + 1);
     }
@@ -301,6 +302,22 @@ const MovementBandwidthBinding& Sys::movement_resource(
 void Sys::validate_tier_manifest_digest(
     const std::string& et_manifest_digest) const {
     validate_et_manifest_digest(tier_manifest_digest, et_manifest_digest);
+}
+
+void Sys::validate_service_metadata(const Chakra::ETFeeder& feeder) const {
+    const auto& expected = service_binding_identity;
+    if (feeder.serviceBindingDigest() != expected.binding_digest ||
+        feeder.serviceActivationId() != expected.activation_id) {
+        throw std::invalid_argument("ET physical service binding/activation mismatch");
+    }
+    if (!tier_manifest_digest.empty()) {
+        if (expected.binding_digest.empty() || !feeder.serviceRank().has_value() ||
+            feeder.serviceRank().value() != static_cast<uint32_t>(id)) {
+            throw std::invalid_argument("native ET physical service rank/identity missing or mismatched");
+        }
+    } else if (feeder.serviceRank().has_value()) {
+        throw std::invalid_argument("legacy ET cannot carry physical service rank");
+    }
 }
 
 bool Sys::memory_movement_drained() const {

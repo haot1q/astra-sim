@@ -65,6 +65,7 @@ struct MemoryTierConfigSet {
     std::vector<MovementPathCapabilityConfig> movement_path_capabilities;
     std::vector<MovementBandwidthResourceConfig>
         movement_bandwidth_resources;
+    nlohmann::json native_payload;
 };
 
 MemoryTierConfigSet parse_memory_tier_config(const nlohmann::json& payload);

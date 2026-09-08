@@ -69,6 +69,20 @@ if(BUILD_TESTING)
 endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
+    if(BUILD_TESTING)
+        add_executable(AstraSim_PhysicalServiceEvent_Test
+            tests/PhysicalServiceEventTest.cc
+            congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+        target_link_libraries(AstraSim_PhysicalServiceEvent_Test PRIVATE
+            AstraSim Analytical_Congestion_Unaware)
+        target_include_directories(AstraSim_PhysicalServiceEvent_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
+        add_test(NAME AstraSim_PhysicalServiceEvent_Test COMMAND
+            AstraSim_PhysicalServiceEvent_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json)
+    endif()
     add_executable(AstraSim_Analytical_Congestion_Unaware ${srcs_congestion_unaware} ${srcs_common})
     target_sources(AstraSim_Analytical_Congestion_Unaware PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/congestion_unaware/main.cc)
 

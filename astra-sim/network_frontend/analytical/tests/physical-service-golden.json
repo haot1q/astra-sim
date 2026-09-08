@@ -1,0 +1,26 @@
+{
+  "manifest": {
+    "schema_version": "memory-tier-runtime-v1",
+    "id_mode": "native",
+    "manifest_digest": "sha256:db0f10e2efc524f9d010f558e0a11985d9dbece91e61efdc705ae6f9c067e4d1",
+    "tiers": [{"tier_name": "hbm", "tier_id": 16, "backend_kind": "analytical", "scope": "instance", "pool_key": "hbm", "devices": [{"device_id": 0, "capacity_bytes": 1024}], "num_devices": 1, "mem_latency_ns": 0, "mem_bw_gbps": 1}]
+  },
+  "binding": {
+    "bindings": [
+      {"kind": "memory", "logical_device_id": 0, "logical_ref": "hbm", "physical_resource_ref": "hbm-0", "rank": 0},
+      {"kind": "memory", "logical_device_id": 0, "logical_ref": "hbm", "physical_resource_ref": "hbm-1", "rank": 1}
+    ],
+    "ranks": [
+      {"accelerator_id": "gpu-0", "instance_id": 0, "node_id": 0, "rank": 0},
+      {"accelerator_id": "gpu-1", "instance_id": 1, "node_id": 0, "rank": 1}
+    ],
+    "resources": [
+      {"id": "hbm-0", "kind": "memory", "memory_endpoints": [], "owner_id": "gpu-0", "owner_kind": "accelerator", "physical_device_id": 0, "resource_key": "hbm"},
+      {"id": "hbm-1", "kind": "memory", "memory_endpoints": [], "owner_id": "gpu-1", "owner_kind": "accelerator", "physical_device_id": 0, "resource_key": "hbm"}
+    ],
+    "schema_version": "physical-service-binding-v1",
+    "tier_manifest_digest": "sha256:db0f10e2efc524f9d010f558e0a11985d9dbece91e61efdc705ae6f9c067e4d1",
+    "binding_digest": "sha256:fc79812c13a34bebf35921e93c7cef944080c678226b608530b5df623a362f28",
+    "activation_id": "fixture-run"
+  }
+}

@@ -16,6 +16,7 @@ LICENSE file in the root directory of this source tree.
 #include <vector>
 
 #include "astra-sim/system/AstraMemoryAPI.hh"
+#include "astra-sim/system/memory/PhysicalServiceConfig.hh"
 
 namespace AstraSim {
 
@@ -26,6 +27,7 @@ struct MemoryTierBinding {
     std::string tier_name;
     uint32_t num_devices;
     AstraMemoryAPI* api;
+    ServiceBindingIdentity service_identity;
 };
 
 class MemoryTierRegistry {
@@ -79,6 +81,17 @@ class MemoryTierRegistry {
 
     std::size_t size() const {
         return bindings_.size();
+    }
+
+    ServiceBindingIdentity service_identity() const {
+        const auto identity = bindings_.begin()->second.service_identity;
+        for (const auto& [id, binding] : bindings_) {
+            if (binding.service_identity.binding_digest != identity.binding_digest ||
+                binding.service_identity.activation_id != identity.activation_id) {
+                throw std::invalid_argument("memory tiers disagree on physical service identity");
+            }
+        }
+        return identity;
     }
 
     std::string registered_ids() const {

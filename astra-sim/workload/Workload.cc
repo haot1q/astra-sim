@@ -75,6 +75,7 @@ ETFeeder* Workload::load_et_feeder(const string& workload_filename) {
     auto* feeder = new ETFeeder(workload_filename);
     try {
         sys->validate_tier_manifest_digest(feeder->tierManifestDigest());
+        sys->validate_service_metadata(*feeder);
     } catch (...) {
         delete feeder;
         throw;
