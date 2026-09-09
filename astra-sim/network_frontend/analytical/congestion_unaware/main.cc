@@ -15,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/PdKvTransferExecutor.hh"
+#include "astra-sim/system/memory/PdLocalPreparationExecutor.hh"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -114,6 +115,7 @@ int main(int argc, char* argv[]) {
         systems.push_back(system);
     }
     PdKvTransferExecutor pd_kv_executor(systems);
+    PdLocalPreparationExecutor preparation_executor(systems, &services);
     const auto submit_pd_kv = [&pd_kv_executor](const std::string& command) {
       constexpr const char* prefix = "pd-kv-transfer\t";
       if (command.rfind(prefix, 0) != 0) {
@@ -245,8 +247,8 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
-    const auto all_systems_drained = [&systems, &pd_kv_executor]() {
-      return pd_kv_executor.drained() && std::all_of(
+    const auto all_systems_drained = [&systems, &pd_kv_executor, &preparation_executor]() {
+      return pd_kv_executor.drained() && preparation_executor.drained() && std::all_of(
           systems.begin(), systems.end(), [](const Sys* system) {
             return system->workload->is_finished &&
                 system->memory_movement_drained();
@@ -255,6 +257,11 @@ int main(int argc, char* argv[]) {
     bool exit = false;
     bool exit_requested = false;
     while (!exit) {
+      preparation_executor.rethrow_failure();
+      for (const auto* system : systems) {
+        system->memory_movement_executor->rethrow_failure();
+      }
+      const auto preparation_progress = preparation_executor.completed_count();
       services.rethrow_failure();
       bool asked_any = false;
       if(!event_queue->finished()){
@@ -268,6 +275,14 @@ int main(int argc, char* argv[]) {
       }
 
       services.rethrow_failure();
+      preparation_executor.rethrow_failure();
+      for (const auto* system : systems) {
+        system->memory_movement_executor->rethrow_failure();
+      }
+      if (preparation_progress != preparation_executor.completed_count()) {
+        ++state_gen;
+        clear_suppression();
+      }
       if (exit_requested) {
         exit = all_systems_drained();
         continue;
@@ -344,7 +359,8 @@ int main(int argc, char* argv[]) {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
           }
-          else if (!submit_pd_kv(new_filename)) {
+          else if (!preparation_executor.submit_command(new_filename) &&
+                   !submit_pd_kv(new_filename)) {
             // Add new workload to this system
             systems[npu_id]->workload
                 ->add_workload(new_filename, {});
@@ -427,7 +443,8 @@ int main(int argc, char* argv[]) {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
           }
-          else if (!submit_pd_kv(new_filename)) {
+          else if (!preparation_executor.submit_command(new_filename) &&
+                   !submit_pd_kv(new_filename)) {
             // Add new workload to the systems handled by this npu
             systems[npu_id]->workload
                 ->add_workload(new_filename, managed_systems[idx]);
@@ -447,30 +464,31 @@ int main(int argc, char* argv[]) {
     }
 
     // check non exited system
-    cout << "Checking Non-Exited Systems ..." << endl;
+    emit_memory_protocol_line("Checking Non-Exited Systems ...");
     bool done = true;
     for (int npu_id = 0; npu_id < npus_count; npu_id++) {
 
       if (!systems[npu_id]->workload->is_finished ||
           !systems[npu_id]->memory_movement_drained() ||
-          !pd_kv_executor.drained()) {
+          !pd_kv_executor.drained() || !preparation_executor.drained()) {
         cout << "sys[" << npu_id << "] " << endl;
         systems[npu_id]->workload->et_feeder->printGraph();
         done = false;
       }
     }
+    // Drain asynchronous log output before publishing the terminal protocol.
+    AstraSim::LoggerFactory::shutdown();
     if (done){
       cout << "---------------------------" << endl;
-      cout << "All Request Has Been Exited" << endl;
+      emit_memory_protocol_line("All Request Has Been Exited");
       cout << "---------------------------" << endl;
     }
     else{
       cout << "---------------------------" << endl;
-      cout << "ERROR: Some Requests Remain" << endl;
+      emit_memory_protocol_line("ERROR: Some Requests Remain");
       cout << "---------------------------" << endl;
     }
 
     // terminate simulation
-    AstraSim::LoggerFactory::shutdown();
     return 0;
 }

@@ -34,6 +34,7 @@ class PhysicalServiceFactory {
     ~PhysicalServiceFactory();
     const RankServiceBindings& at(uint32_t rank) const;
     const ServiceBindingIdentity& identity() const;
+    const PhysicalServiceConfig& configuration() const { return config_; }
     void rethrow_failure() const;
 
   private:

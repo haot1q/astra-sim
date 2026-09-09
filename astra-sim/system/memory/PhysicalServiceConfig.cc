@@ -261,6 +261,7 @@ PhysicalServiceConfig load_physical_service_config(
         throw std::invalid_argument("physical service binding content digest mismatch");
     }
     PhysicalServiceConfig result{{digest, activation}, {}, std::move(bindings.backends)};
+    result.ranks = rank_rows;
     for (const auto& [key, row] : bindings.rows) {
         result.bindings.emplace(key, row["physical_resource_ref"]);
     }

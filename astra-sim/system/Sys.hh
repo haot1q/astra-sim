@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 
 #include <chrono>
 #include <memory>
+#include <optional>
 
 #include "astra-sim/common/AstraNetworkAPI.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
@@ -102,6 +103,8 @@ class Sys : public Callable {
     void validate_tier_manifest_digest(
         const std::string& et_manifest_digest) const;
     void validate_service_metadata(const Chakra::ETFeeder& feeder) const;
+    void validate_service_metadata(const std::string& binding_digest,
+        const std::string& activation_id, std::optional<uint32_t> rank) const;
     bool memory_movement_drained() const;
     //---------------------------------------------------------------------------
 

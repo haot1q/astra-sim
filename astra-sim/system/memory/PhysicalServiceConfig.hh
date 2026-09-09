@@ -27,6 +27,7 @@ struct PhysicalServiceConfig {
     ServiceBindingIdentity identity;
     std::map<ServiceAccess, std::string> bindings;
     std::map<std::string, nlohmann::json> backends;
+    std::map<uint32_t, nlohmann::json> ranks;
 };
 
 // Validate the complete rank/endpoint Cartesian product before creating queues.

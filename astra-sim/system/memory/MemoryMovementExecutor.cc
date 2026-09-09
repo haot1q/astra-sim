@@ -195,7 +195,9 @@ uint64_t time_proportional_bytes(uint64_t bytes,
         bytes, static_cast<uint64_t>(product / service_ns));
 }
 
-void emit_protocol_line(const std::string& content) {
+}  // namespace
+
+void emit_memory_protocol_line(const std::string& content) {
     const std::string line = content + "\n";
     const long reported_limit = ::fpathconf(STDOUT_FILENO, _PC_PIPE_BUF);
     const std::size_t atomic_limit =
@@ -219,8 +221,6 @@ void emit_protocol_line(const std::string& content) {
     }
 }
 
-}  // namespace
-
 MemoryMovementExecutor::MemoryMovementExecutor(Sys* sys) : sys_(sys) {
     if (sys_ == nullptr) {
         throw std::invalid_argument("memory movement executor requires Sys");
@@ -236,6 +236,35 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
                                     Workload* workload) {
     if (workload == nullptr) {
         throw std::invalid_argument("movement submission requires Workload");
+    }
+    return submit_owned(node, WorkloadMovementCompletion{*workload});
+}
+
+void MemoryMovementExecutor::submit_preparation(
+    const std::shared_ptr<ETFeederNode>& node,
+    ExternalPreparationCompletion completion) {
+    if (completion.preparation_id.empty()) {
+        throw std::invalid_argument("external movement requires preparation identity");
+    }
+    if (node == nullptr || !node->getChildren().empty()
+        || !node->getDepUnresolvedParentIDs().empty()
+        || node->getChakraNode()->data_deps_size() != 0
+        || node->getChakraNode()->ctrl_deps_size() != 0
+        || (node->type() != ChakraProtoMsg::MEM_LOAD_NODE
+            && node->type() != ChakraProtoMsg::MEM_STORE_NODE)) {
+        throw std::invalid_argument(
+            "external preparation requires an isolated memory node; "
+            "use movement_dependencies for preparation ordering");
+    }
+    submit_owned(node, std::move(completion));
+}
+
+bool MemoryMovementExecutor::submit_owned(
+    const std::shared_ptr<ETFeederNode>& node,
+    MovementCompletionOwner completion) {
+    rethrow_failure();
+    if (node == nullptr) {
+        throw std::invalid_argument("movement submission requires an ET node");
     }
     if (string_attr(node, "memory_movement_schema_version") !=
         kMemoryMovementSchemaVersion) {
@@ -421,7 +450,7 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
     const auto inserted = submissions_.emplace(
         event_id, Submission{
                       node->id(),
-                      workload,
+                      std::move(completion),
                       foreground,
                       run_id,
                       string_attr(node, "movement_instance_id"),
@@ -450,6 +479,7 @@ bool MemoryMovementExecutor::submit(const std::shared_ptr<ETFeederNode>& node,
 }
 
 void MemoryMovementExecutor::dispatch() {
+    rethrow_failure();
     if (scheduler_ == nullptr) {
         return;
     }
@@ -599,13 +629,14 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
         compute_overlap_ns(receipt.start_ns, receipt.finish_ns);
     const uint64_t overlap_compute_bytes = time_proportional_bytes(
         receipt.bytes, overlap_compute_ns, receipt.service_ns);
+    const auto* workload =
+        std::get_if<WorkloadMovementCompletion>(&submission.completion);
     const std::optional<uint64_t> exposed_to_dependent_ns =
-        submission.foreground
-            ? submission.workload->movement_exposed_to_dependent_ns(
+        submission.foreground && workload != nullptr
+            ? workload->workload.get().movement_exposed_to_dependent_ns(
                   submission.node_id, receipt.ready_ns, receipt.finish_ns)
             : std::nullopt;
-    emit_protocol_line(
-        "MEMORY_MOVEMENT_COMPLETE " +
+    const std::string serialized =
         receipt_json(receipt, submission.run_id, submission.instance_id,
                      submission.manifest_digest, scheduler_->config(),
                      overlap_compute_ns, overlap_compute_bytes,
@@ -619,18 +650,39 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
                      submission.segment_timings,
                      *submission.source_endpoint,
                      *submission.destination_endpoint)
-            .dump());
-    submissions_.erase(event_id);
-    if (submission.foreground) {
-        submission.workload->complete_memory_movement(submission.node_id);
+            .dump();
+    // Retain the submission until its owner has accepted completion. A callback
+    // failure must not let drained() report a successful cleanup.
+    if (workload != nullptr) {
+        emit_memory_protocol_line("MEMORY_MOVEMENT_COMPLETE " + serialized);
+        if (submission.foreground) {
+            workload->workload.get().complete_memory_movement(submission.node_id);
+        }
+    } else {
+        const auto& external =
+            std::get<ExternalPreparationCompletion>(submission.completion);
+        external.owner.get().complete_memory_preparation(
+            {external.preparation_id, receipt, serialized});
     }
+    submissions_.erase(event_id);
     dispatch();
     if (scheduler_->drained()) {
-        emit_protocol_line("MEMORY_MOVEMENT_DRAINED");
+        emit_memory_protocol_line("MEMORY_MOVEMENT_DRAINED");
     }
 }
 
 void MemoryMovementExecutor::call(EventType type, CallData* data) {
+    try {
+        complete_stage(type, data);
+    } catch (...) {
+        // Sys's legacy event dispatcher logs and catches callback exceptions.
+        // Keep the original failure for both analytical frontends to rethrow.
+        if (!failure_) failure_ = std::current_exception();
+        throw;
+    }
+}
+
+void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
     (void)type;
     if (data == nullptr) {
         throw std::invalid_argument("invalid memory movement callback data");
@@ -724,7 +776,12 @@ void MemoryMovementExecutor::call(EventType type, CallData* data) {
 }
 
 bool MemoryMovementExecutor::drained() const {
-    return scheduler_ == nullptr || scheduler_->drained();
+    return !failure_ && submissions_.empty() &&
+           (scheduler_ == nullptr || scheduler_->drained());
+}
+
+void MemoryMovementExecutor::rethrow_failure() const {
+    if (failure_) std::rethrow_exception(failure_);
 }
 
 void MemoryMovementExecutor::record_compute_start(uint64_t node_id) {

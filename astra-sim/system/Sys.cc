@@ -305,17 +305,22 @@ void Sys::validate_tier_manifest_digest(
 }
 
 void Sys::validate_service_metadata(const Chakra::ETFeeder& feeder) const {
+    validate_service_metadata(feeder.serviceBindingDigest(),
+                              feeder.serviceActivationId(), feeder.serviceRank());
+}
+
+void Sys::validate_service_metadata(const std::string& binding_digest,
+        const std::string& activation_id, std::optional<uint32_t> rank) const {
     const auto& expected = service_binding_identity;
-    if (feeder.serviceBindingDigest() != expected.binding_digest ||
-        feeder.serviceActivationId() != expected.activation_id) {
+    if (binding_digest != expected.binding_digest || activation_id != expected.activation_id) {
         throw std::invalid_argument("ET physical service binding/activation mismatch");
     }
     if (!tier_manifest_digest.empty()) {
-        if (expected.binding_digest.empty() || !feeder.serviceRank().has_value() ||
-            feeder.serviceRank().value() != static_cast<uint32_t>(id)) {
+        if (expected.binding_digest.empty() || !rank.has_value() ||
+            rank.value() != static_cast<uint32_t>(id)) {
             throw std::invalid_argument("native ET physical service rank/identity missing or mismatched");
         }
-    } else if (feeder.serviceRank().has_value()) {
+    } else if (rank.has_value()) {
         throw std::invalid_argument("legacy ET cannot carry physical service rank");
     }
 }
