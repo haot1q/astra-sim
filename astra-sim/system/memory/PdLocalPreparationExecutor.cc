@@ -8,6 +8,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 #include <utility>
 
 #include "MemoryPreparationTrace.hh"
+#include "PipelinePreparationIdentity.hh"
 #include "ServiceBindingJson.hh"
 #include "astra-sim/system/Sys.hh"
 #include "extern/graph_frontend/chakra/src/feeder/et_feeder_node.h"
@@ -85,15 +86,23 @@ PdLocalPreparationExecutor::PdLocalPreparationExecutor(const std::vector<Sys*>& 
 std::vector<PdLocalPreparationExecutor::Submission>
 PdLocalPreparationExecutor::read_work(const std::string& path) const {
     const auto work = Wire::read(path);
-    Wire::fields(work, {"schema_version", "run_id", "attempt_id", "transfer_id",
+    const bool staged = work.at("schema_version") == "pd-local-preparation-v2";
+    auto envelope = work;
+    if (staged) {
+        envelope.erase("pipeline_stage");
+        envelope.erase("endpoint");
+    }
+    Wire::fields(envelope, {"schema_version", "run_id", "attempt_id", "transfer_id",
         "preparation_id", "instance_id", "manifest_digest", "service_binding_digest",
         "service_activation_id", "backend_instance_id", "rank_traces"});
-    if (work.at("schema_version") != "pd-local-preparation-v1") {
+    if (!staged && work.at("schema_version") != "pd-local-preparation-v1") {
         throw std::invalid_argument("unsupported preparation work schema");
     }
     const auto owner = identity(work);
     const auto instance = Wire::uint32(work.at("backend_instance_id"));
     if (!services_) throw std::invalid_argument("preparation requires actual physical services");
+    const auto stage = staged ? validate_pipeline_preparation_identity(work, *services_)
+                              : PipelinePreparationIdentity{};
     std::vector<Submission> submissions;
     std::set<uint32_t> ranks;
     std::set<std::string> physical_ids;
@@ -129,6 +138,9 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
         }
         const auto trace = read_memory_preparation_trace(
             text(item.at("trace_path")), rank_events.size());
+        if (trace.pipeline_stage_digest != stage.digest) {
+            throw std::invalid_argument("preparation ET stage digest differs from original work");
+        }
         auto& system = *systems_.at(rank);
         system.validate_tier_manifest_digest(trace.manifest_digest);
         system.validate_service_metadata(trace.binding_digest, trace.activation_id, trace.rank);
@@ -149,6 +161,9 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
         if (observed != rank_events) throw std::invalid_argument("preparation event set incomplete");
     }
     if (submissions.empty()) throw std::invalid_argument("empty preparation work");
+    if (staged && std::vector<uint32_t>(ranks.begin(), ranks.end()) != stage.ranks) {
+        throw std::invalid_argument("preparation work does not cover the exact stage TP ranks");
+    }
     return submissions;
 }
 

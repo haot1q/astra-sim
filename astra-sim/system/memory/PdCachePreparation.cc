@@ -7,6 +7,7 @@ This source code is licensed under the MIT license found in the root LICENSE.
 #include <algorithm>
 #include <memory>
 #include "MemoryMovementExecutor.hh"
+#include "PipelinePreparationIdentity.hh"
 #include "ServiceBindingJson.hh"
 #include "UcieTransport.hh"
 #include "astra-sim/system/Sys.hh"
@@ -44,7 +45,13 @@ PdCachePreparation::PdCachePreparation(const std::vector<Sys*>& systems,
 PdCachePreparation::Work PdCachePreparation::read_work(const std::string& path) const {
     require(std::filesystem::file_size(path) <= 64 * 1024 * 1024, "Cache work exceeds protocol size limit");
     auto document = Wire::read(path);
-    Wire::fields(document, {"schema_version", "work_digest", "run_id", "attempt_id", "transfer_id",
+    const bool staged = document.at("schema_version") == "pd-cache-preparation-v2";
+    auto envelope = document;
+    if (staged) {
+        envelope.erase("pipeline_stage");
+        envelope.erase("endpoint");
+    }
+    Wire::fields(envelope, {"schema_version", "work_digest", "run_id", "attempt_id", "transfer_id",
         "instance_id", "backend_instance_id", "plan_id", "page_id", "expected_residency_version",
         "home_domain_id", "manifest_digest", "service_binding_digest", "service_activation_id",
         "tier_name", "tier_id", "device_id", "ucie_link_id", "writeback_latency_ns", "ranks", "events"});
@@ -52,7 +59,7 @@ PdCachePreparation::Work PdCachePreparation::read_work(const std::string& path) 
     auto body = document;
     body.erase("work_digest");
     require(digest == Wire::digest(body, true), "Cache work digest mismatch");
-    require(document.at("schema_version") == "pd-cache-preparation-v1", "unsupported Cache work schema");
+    require(staged || document.at("schema_version") == "pd-cache-preparation-v1", "unsupported Cache work schema");
     require(document.at("manifest_digest") == memory_.manifest_digest &&
         document.at("service_binding_digest") == services_.identity().binding_digest &&
         document.at("service_activation_id") == services_.identity().activation_id,
@@ -73,6 +80,10 @@ PdCachePreparation::Work PdCachePreparation::read_work(const std::string& path) 
         result.ranks.push_back(rank);
     }
     require(!result.ranks.empty(), "Cache preparation requires actual ranks");
+    if (staged) {
+        const auto stage = validate_pipeline_preparation_identity(document, services_);
+        require(result.ranks == stage.ranks, "Cache work does not cover exact stage TP ranks");
+    }
     validate_location(document, result);
     const auto& cache = memory_.native_payload.at("cache_hierarchy");
     require(number(document.at("writeback_latency_ns")) == number(cache.at("writeback_latency_ns")),

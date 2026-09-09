@@ -68,6 +68,7 @@ MemoryPreparationTrace read_metadata(std::ifstream& input) {
         if (attr.name() == "tier_manifest_digest") identity = &result.manifest_digest;
         if (attr.name() == "service_binding_digest") identity = &result.binding_digest;
         if (attr.name() == "service_activation_id") identity = &result.activation_id;
+        if (attr.name() == "pipeline_stage_digest") identity = &result.pipeline_stage_digest;
         if (identity != nullptr) {
             if (!attr.has_string_val() || attr.string_val().empty()) {
                 throw std::invalid_argument("invalid preparation metadata identity");

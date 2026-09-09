@@ -21,6 +21,7 @@ struct MemoryPreparationTrace {
     std::string manifest_digest;
     std::string binding_digest;
     std::string activation_id;
+    std::string pipeline_stage_digest;
     uint32_t rank;
     std::vector<std::shared_ptr<Chakra::ETFeederNode>> nodes;
 };
