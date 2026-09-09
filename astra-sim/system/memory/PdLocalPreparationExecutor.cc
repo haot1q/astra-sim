@@ -8,7 +8,6 @@ This source code is licensed under the MIT license found in the LICENSE file.
 #include <utility>
 
 #include "MemoryPreparationTrace.hh"
-#include "PhysicalServiceFactory.hh"
 #include "ServiceBindingJson.hh"
 #include "astra-sim/system/Sys.hh"
 #include "extern/graph_frontend/chakra/src/feeder/et_feeder_node.h"
@@ -69,8 +68,12 @@ void validate_node(const std::shared_ptr<Chakra::ETFeederNode>& node,
 }  // namespace
 
 PdLocalPreparationExecutor::PdLocalPreparationExecutor(const std::vector<Sys*>& systems,
-        PhysicalServiceFactory* services)
+        PhysicalServiceFactory* services, const MemoryTierConfigSet* memory)
     : systems_(systems), services_(services) {
+    if ((services == nullptr) != (memory == nullptr)) {
+        throw std::invalid_argument("Cache preparation needs both services and memory");
+    }
+    if (services) cache_ = std::make_unique<PdCachePreparation>(systems, *services, *memory);
     if (systems.empty()) throw std::invalid_argument("preparation requires actual systems");
     for (std::size_t rank = 0; rank < systems.size(); ++rank) {
         if (systems[rank] == nullptr || systems[rank]->id != static_cast<int>(rank)) {
@@ -150,6 +153,17 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
 }
 
 bool PdLocalPreparationExecutor::submit_command(const std::string& command) {
+    for (const auto* marker : {"pd-cache-prepare\t", "pd-cache-cancel\t"}) {
+        if (command.rfind(marker, 0) != 0) continue;
+        rethrow_failure();
+        const auto argument = command.substr(std::char_traits<char>::length(marker));
+        if (!cache_ || argument.empty() || argument.find_first_of("\t\r\n") != std::string::npos) {
+            throw std::invalid_argument("invalid or unavailable Cache preparation command");
+        }
+        if (std::string(marker) == "pd-cache-prepare\t") cache_->submit(argument);
+        else cache_->cancel(argument);
+        return true;
+    }
     constexpr const char* prefix = "pd-local-prepare\t";
     if (command.rfind(prefix, 0) != 0) return false;
     rethrow_failure();
@@ -213,11 +227,12 @@ void PdLocalPreparationExecutor::complete_memory_preparation(
 }
 
 bool PdLocalPreparationExecutor::drained() const {
-    return !failure_ && pending_.empty();
+    return !failure_ && pending_.empty() && (!cache_ || cache_->drained());
 }
 
 void PdLocalPreparationExecutor::rethrow_failure() const {
     if (failure_) std::rethrow_exception(failure_);
+    if (cache_) cache_->rethrow_failure();
 }
 
 }  // namespace AstraSim

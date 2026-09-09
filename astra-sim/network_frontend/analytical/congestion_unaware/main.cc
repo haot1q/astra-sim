@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
         systems.push_back(system);
     }
     PdKvTransferExecutor pd_kv_executor(systems);
-    PdLocalPreparationExecutor preparation_executor(systems, &services);
+    PdLocalPreparationExecutor preparation_executor(systems, &services, &memory_config);
     const auto submit_pd_kv = [&pd_kv_executor](const std::string& command) {
       constexpr const char* prefix = "pd-kv-transfer\t";
       if (command.rfind(prefix, 0) != 0) {

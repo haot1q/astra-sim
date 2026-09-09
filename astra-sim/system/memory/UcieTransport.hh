@@ -32,6 +32,14 @@ struct UcieHopSpec {
     uint64_t bytes;
 };
 
+struct UcieMemoryRequest {
+    uint32_t tier_id;
+    uint32_t device_id;
+    uint64_t payload_bytes;
+    std::string link_id;
+    MemoryOperation operation;
+};
+
 bool node_requests_ucie_transport(
     const std::shared_ptr<Chakra::ETFeederNode>& node);
 std::string ucie_link_id_attr(
@@ -43,6 +51,9 @@ void issue_ucie_mem(
     const std::shared_ptr<Chakra::ETFeederNode>& node,
     WorkloadLayerHandlerData* wlhd,
     MemoryOperation operation);
+
+void issue_ucie_mem(Sys* sys, const UcieMemoryRequest& request,
+                    WorkloadLayerHandlerData* handler);
 
 }  // namespace AstraSim
 

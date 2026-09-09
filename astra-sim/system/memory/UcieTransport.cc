@@ -119,6 +119,9 @@ std::vector<UcieHopSpec> ucie_transaction_hops(
         operation != MemoryOperation::Write) {
         throw std::invalid_argument("UCIe operation must be read or write");
     }
+    if (operation == MemoryOperation::Write && payload_bytes > UINT64_MAX - header_bytes) {
+        throw std::overflow_error("UCIe header plus payload exceeds uint64");
+    }
     std::vector<UcieHopSpec> hops;
     if (operation == MemoryOperation::Read) {
         if (header_bytes != 0) {
@@ -145,20 +148,28 @@ void issue_ucie_mem(
     const std::shared_ptr<ETFeederNode>& node,
     WorkloadLayerHandlerData* wlhd,
     MemoryOperation operation) {
+    issue_ucie_mem(sys, {node->tensor_loc(), node->tensor_device(), node->tensor_size(),
+                        ucie_link_id_attr(node), operation}, wlhd);
+}
+
+void issue_ucie_mem(Sys* sys, const UcieMemoryRequest& request,
+                    WorkloadLayerHandlerData* wlhd) {
     if (sys == nullptr || wlhd == nullptr) {
         throw std::invalid_argument("UCIe issue requires sys and handler data");
     }
-    const auto& link = sys->ucie_link(ucie_link_id_attr(node));
-    const uint32_t device_id = node->tensor_device();
+    const auto& link = sys->ucie_link(request.link_id);
+    const uint32_t device_id = request.device_id;
     if (device_id >= link.stack_count) {
         throw std::out_of_range(
             "UCIe link '" + link.id + "' device_id is out of range");
     }
-    const uint64_t payload = node->tensor_size();
+    const uint64_t payload = request.payload_bytes;
+    const auto operation = request.operation;
     if (payload == 0) {
         throw std::invalid_argument("UCIe HBM payload must be positive");
     }
-    AstraMemoryAPI* hbm = sys->memory_api(node->tensor_loc(), device_id);
+    ucie_transaction_hops(operation, payload, link.header_bytes);
+    AstraMemoryAPI* hbm = sys->memory_api(request.tier_id, device_id);
     std::vector<IssuedHop> hops;
     if (operation == MemoryOperation::Read) {
         if (link.header_bytes != 0) {

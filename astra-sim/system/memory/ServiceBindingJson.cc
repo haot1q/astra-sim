@@ -76,9 +76,9 @@ void reject_floats(const Json& value) {
 }
 }  // namespace
 
-std::string digest(const Json& body) {
+std::string digest(const Json& body, bool ensure_ascii) {
     reject_floats(body);
-    const auto canonical = body.dump();
+    const auto canonical = body.dump(-1, ' ', ensure_ascii);
     unsigned char bytes[EVP_MAX_MD_SIZE];
     unsigned int length = 0;
     if (EVP_Digest(canonical.data(), canonical.size(), bytes, &length,

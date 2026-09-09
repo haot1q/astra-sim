@@ -13,6 +13,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 #include <vector>
 
 #include "MemoryMovementExecutor.hh"
+#include "PdCachePreparation.hh"
 #include "extern/helper/json/json.hpp"
 
 namespace AstraSim {
@@ -22,12 +23,12 @@ class PhysicalServiceFactory;
 class PdLocalPreparationExecutor : public MemoryPreparationOwner {
   public:
     explicit PdLocalPreparationExecutor(const std::vector<Sys*>& systems,
-        PhysicalServiceFactory* services);
+        PhysicalServiceFactory* services = nullptr, const MemoryTierConfigSet* memory = nullptr);
     bool submit_command(const std::string& command);
     void complete_memory_preparation(const MemoryPreparationReceipt& receipt) override;
     bool drained() const;
     std::size_t completed_count() const {
-        return completed_count_;
+        return completed_count_ + (cache_ ? cache_->completed_count() : 0);
     }
     void rethrow_failure() const;
 
@@ -48,6 +49,7 @@ class PdLocalPreparationExecutor : public MemoryPreparationOwner {
     std::set<std::string> used_preparations_;
     std::size_t completed_count_ = 0;
     std::exception_ptr failure_;
+    std::unique_ptr<PdCachePreparation> cache_;
 };
 
 }  // namespace AstraSim
