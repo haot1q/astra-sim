@@ -47,9 +47,15 @@ std::string require_string(const json& value, const char* field) {
 
 }  // namespace
 
-PdKvTransferExecutor::PdKvTransferExecutor(const std::vector<Sys*>& systems)
+PdKvTransferExecutor::PdKvTransferExecutor(const std::vector<Sys*>& systems,
+                                          PhysicalServiceFactory* services,
+                                          json actual_network)
     : systems_(systems) {
     for (auto* system : systems_) system->bind_native_tags(&native_tags_);
+    if (services != nullptr && !services->pd_path_config().binding_digest.empty()) {
+        path_ = std::make_unique<PdPathExecutor>(systems_, *services, native_tags_,
+                                                std::move(actual_network));
+    }
 }
 
 void PdKvTransferExecutor::lease_tags(Transfer& transfer) {
@@ -78,6 +84,11 @@ void PdKvTransferExecutor::submit(const std::string& descriptor_path,
     }
     json root;
     stream >> root;
+    if (root.is_object() && root.value("schema_version", "") == "pd-path-work-v1") {
+        if (!path_) throw std::runtime_error("P/D path services are not activated");
+        path_->submit(descriptor_path, ready_ns);
+        return;
+    }
     if (!root.is_object() || root.size() != 2 ||
         !root.contains("descriptor") || !root.contains("descriptor_digest")) {
         throw std::runtime_error("P/D sidecar fields do not match v1 contract");
@@ -229,11 +240,22 @@ void PdKvTransferExecutor::finish_if_complete(uint64_t transfer_index) {
 }
 
 bool PdKvTransferExecutor::drained() const {
-    return transfers_.empty() && native_tags_.drained();
+    return transfers_.empty() && native_tags_.drained() && (!path_ || path_->drained());
 }
 
 void PdKvTransferExecutor::rethrow_failure() const {
     native_tags_.rethrow_failure();
+    if (path_) path_->rethrow_failure();
+}
+
+void PdKvTransferExecutor::cancel_path(const std::string& transfer_id) {
+    rethrow_failure();
+    if (!path_) throw std::runtime_error("P/D path services are not activated");
+    path_->cancel(transfer_id);
+}
+
+uint64_t PdKvTransferExecutor::path_completed_count() const {
+    return path_ ? path_->completed_count() : 0;
 }
 
 }  // namespace AstraSim

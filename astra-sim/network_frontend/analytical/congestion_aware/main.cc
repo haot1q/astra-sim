@@ -15,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/PdKvTransferExecutor.hh"
+#include "common/PdNetworkProjection.hh"
 #include "astra-sim/system/memory/PdLocalPreparationExecutor.hh"
 #include <algorithm>
 #include <cstdlib>
@@ -116,9 +117,14 @@ int main(int argc, char* argv[]) {
         network_apis.push_back(std::move(network_api));
         systems.push_back(system);
     }
-    PdKvTransferExecutor pd_kv_executor(systems);
+    PdKvTransferExecutor pd_kv_executor(systems, &services, pd_network_projection(network_parser));
     PdLocalPreparationExecutor preparation_executor(systems, &services, &memory_config);
     const auto submit_pd_kv = [&pd_kv_executor](const std::string& command) {
+      constexpr const char* cancel = "pd-path-cancel\t";
+      if (command.rfind(cancel, 0) == 0) {
+        pd_kv_executor.cancel_path(command.substr(std::char_traits<char>::length(cancel)));
+        return true;
+      }
       constexpr const char* prefix = "pd-kv-transfer\t";
       if (command.rfind(prefix, 0) != 0) {
         return false;
@@ -264,6 +270,7 @@ int main(int argc, char* argv[]) {
       for (const auto* system : systems) {
         system->memory_movement_executor->rethrow_failure();
       }
+      const auto path_progress = pd_kv_executor.path_completed_count();
       const auto preparation_progress = preparation_executor.completed_count();
       services.rethrow_failure();
       bool asked_any = false;
@@ -283,7 +290,8 @@ int main(int argc, char* argv[]) {
       for (const auto* system : systems) {
         system->memory_movement_executor->rethrow_failure();
       }
-      if (preparation_progress != preparation_executor.completed_count()) {
+      if (path_progress != pd_kv_executor.path_completed_count() ||
+          preparation_progress != preparation_executor.completed_count()) {
         ++state_gen;
         clear_suppression();
       }

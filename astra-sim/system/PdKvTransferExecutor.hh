@@ -13,6 +13,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 
 #include "astra-sim/system/Callable.hh"
 #include "astra-sim/system/NativeTagRegistry.hh"
+#include "astra-sim/system/memory/PdPathExecutor.hh"
 
 namespace AstraSim {
 
@@ -20,12 +21,16 @@ class Sys;
 
 class PdKvTransferExecutor : public Callable {
   public:
-    explicit PdKvTransferExecutor(const std::vector<Sys*>& systems);
+    explicit PdKvTransferExecutor(const std::vector<Sys*>& systems,
+                                  PhysicalServiceFactory* services = nullptr,
+                                  nlohmann::json actual_network = nullptr);
 
     void submit(const std::string& descriptor_path, uint64_t ready_ns);
     void call(EventType event, CallData* data) override;
     bool drained() const;
     void rethrow_failure() const;
+    void cancel_path(const std::string& transfer_id);
+    uint64_t path_completed_count() const;
 
   private:
     struct RankPair {
@@ -58,6 +63,7 @@ class PdKvTransferExecutor : public Callable {
 
     std::vector<Sys*> systems_;
     NativeTagRegistry native_tags_;
+    std::unique_ptr<PdPathExecutor> path_;
     std::map<uint64_t, std::unique_ptr<Transfer>> transfers_;
     uint64_t next_transfer_index_ = 0;
 };
