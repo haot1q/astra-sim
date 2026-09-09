@@ -103,6 +103,12 @@ class DmaScheduler {
     DmaJob active_job(const std::string& event_id) const;
 
     bool drained() const;
+    bool accepted(const std::string& event_id) const {
+        return accepted_ids_.count(event_id) != 0;
+    }
+    bool completed(const std::string& event_id) const {
+        return completed_ids_.count(event_id) != 0;
+    }
     std::size_t pending_count() const;
     std::size_t in_flight_count() const;
     const DmaSchedulerConfig& config() const;

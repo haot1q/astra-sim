@@ -266,9 +266,13 @@ bool MemoryMovementExecutor::submit_owned(
     if (node == nullptr) {
         throw std::invalid_argument("movement submission requires an ET node");
     }
-    if (string_attr(node, "memory_movement_schema_version") !=
-        kMemoryMovementSchemaVersion) {
+    const auto schema = string_attr(node, "memory_movement_schema_version");
+    if (schema != kMemoryMovementSchemaVersion && schema != "memory-events-v2") {
         throw std::invalid_argument("unsupported memory movement schema");
+    }
+    if (schema == "memory-events-v2" &&
+        std::get_if<WorkloadMovementCompletion>(&completion) == nullptr) {
+        throw std::invalid_argument("prior movement references require a workload");
     }
     const std::string manifest_digest =
         string_attr(node, "memory_movement_manifest_digest");
@@ -446,7 +450,15 @@ bool MemoryMovementExecutor::submit_owned(
         throw std::invalid_argument(
             "movement home_domain_id must match paired device IDs");
     }
+    const auto instance_id = string_attr(node, "movement_instance_id");
+    const auto source_iteration = job.source_iteration_id;
+    validate_prior_dependencies(
+        job, instance_id, schema,
+        schema == "memory-events-v2"
+            ? string_list_attr(node, "movement_prior_dependencies")
+            : std::vector<std::string>{});
     scheduler_->submit(std::move(job));
+    accepted_identities_.emplace(event_id, AcceptedIdentity{instance_id, source_iteration});
     const auto inserted = submissions_.emplace(
         event_id, Submission{
                       node->id(),
@@ -665,8 +677,9 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
             {external.preparation_id, receipt, serialized});
     }
     submissions_.erase(event_id);
+    complete_waiters(event_id);
     dispatch();
-    if (scheduler_->drained()) {
+    if (drained()) {
         emit_memory_protocol_line("MEMORY_MOVEMENT_DRAINED");
     }
 }
@@ -776,7 +789,7 @@ void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
 }
 
 bool MemoryMovementExecutor::drained() const {
-    return !failure_ && submissions_.empty() &&
+    return !failure_ && submissions_.empty() && waiters_.empty() &&
            (scheduler_ == nullptr || scheduler_->drained());
 }
 

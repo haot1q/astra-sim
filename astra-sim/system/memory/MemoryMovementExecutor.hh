@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #ifndef __MEMORY_MOVEMENT_EXECUTOR_HH__
 #define __MEMORY_MOVEMENT_EXECUTOR_HH__
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -92,6 +93,9 @@ class MemoryMovementExecutor : public Callable {
         const std::shared_ptr<Chakra::ETFeederNode>& node) const;
     bool submit(const std::shared_ptr<Chakra::ETFeederNode>& node,
                 Workload* workload);
+    bool is_wait_node(const std::shared_ptr<Chakra::ETFeederNode>& node) const;
+    bool submit_wait(const std::shared_ptr<Chakra::ETFeederNode>& node,
+                     Workload* workload);
     void submit_preparation(const std::shared_ptr<Chakra::ETFeederNode>& node,
                             ExternalPreparationCompletion completion);
     void dispatch();
@@ -102,6 +106,28 @@ class MemoryMovementExecutor : public Callable {
     void record_compute_finish(uint64_t node_id);
 
   private:
+    struct AcceptedIdentity {
+        std::string instance_id;
+        uint32_t source_iteration;
+    };
+    struct Waiter {
+        Workload* workload;
+        uint32_t iteration;
+        std::shared_ptr<Chakra::ETFeederNode> node;
+        std::unordered_set<std::string> dependencies;
+    };
+    void validate_prior_dependencies(
+        const DmaJob& job, const std::string& instance_id, const std::string& schema,
+        const std::vector<std::string>& prior_dependencies) const;
+    void require_prior_event(const std::string& event_id,
+                             const std::string& instance_id,
+                             uint32_t source_iteration) const;
+    void complete_waiters(const std::string& event_id);
+    std::unordered_map<std::string, AcceptedIdentity> accepted_identities_;
+    std::unordered_map<uint64_t, Waiter> waiters_;
+    std::unordered_map<std::string, std::vector<uint64_t>> waiting_by_event_;
+    uint64_t next_wait_id_ = 0;
+
     struct Submission {
         uint64_t node_id;
         MovementCompletionOwner completion;

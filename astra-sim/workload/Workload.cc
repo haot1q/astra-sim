@@ -150,6 +150,16 @@ void Workload::issue_dep_free_nodes() {
 
 void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
     auto logger = LoggerFactory::get_logger("workload");
+    if (sys->memory_movement_executor->is_wait_node(node)) {
+        if (!pending_memory_waits_.emplace(node->id(), node).second) {
+            throw std::invalid_argument("duplicate workload memory wait");
+        }
+        if (!sys->memory_movement_executor->submit_wait(node, this)) {
+            pending_memory_waits_.erase(node->id());
+            skip_invalid(node);
+        }
+        return;
+    }
     if (sys->memory_movement_executor->is_movement_node(node)) {
         issue_memory_movement(node);
         return;
@@ -227,6 +237,18 @@ void Workload::complete_memory_movement(uint64_t node_id) {
     call(EventType::General, data);
 }
 
+void Workload::complete_memory_wait(
+    const shared_ptr<Chakra::ETFeederNode>& node, uint32_t expected_iteration) {
+    const auto pending = pending_memory_waits_.find(node->id());
+    if (iteration != expected_iteration || is_finished ||
+        pending == pending_memory_waits_.end() || pending->second != node ||
+        et_feeder->lookupNode(node->id()) != node) {
+        throw std::logic_error("memory wait callback changed workload/ET identity");
+    }
+    pending_memory_waits_.erase(pending);
+    complete_memory_movement(node->id());
+}
+
 optional<uint64_t> Workload::movement_exposed_to_dependent_ns(
     uint64_t node_id,
     uint64_t ready_ns,
@@ -264,6 +286,9 @@ void Workload::record_parent_completion(
 }
 
 void Workload::reset_iteration_tracking() {
+    if (!pending_memory_waits_.empty()) {
+        throw std::logic_error("cannot replace ET with pending memory waits");
+    }
     latest_parent_completion_ns_.clear();
 }
 
@@ -562,7 +587,7 @@ void Workload::call(EventType event, CallData* data) {
         }
     }
 
-    if (!et_feeder->hasNodesToIssue() &&
+    if (!et_feeder->hasNodesToIssue() && pending_memory_waits_.empty() &&
         (hw_resource->num_in_flight_cpu_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comp_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comm_ops == 0) ) {

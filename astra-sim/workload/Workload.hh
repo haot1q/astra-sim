@@ -43,6 +43,8 @@ class Workload : public Callable {
     // void issue_remote_mem(std::shared_ptr<Chakra::ETFeederNode> node); integrated into issue_mem
     void issue_mem(std::shared_ptr<Chakra::ETFeederNode> node);
     void issue_memory_movement(std::shared_ptr<Chakra::ETFeederNode> node);
+    void complete_memory_wait(const std::shared_ptr<Chakra::ETFeederNode>& node,
+                              uint32_t expected_iteration);
     void complete_memory_movement(uint64_t node_id);
     std::optional<uint64_t> movement_exposed_to_dependent_ns(
         uint64_t node_id,
@@ -79,6 +81,7 @@ class Workload : public Callable {
         const std::shared_ptr<Chakra::ETFeederNode>& node);
     void reset_iteration_tracking();
     std::unordered_map<uint64_t, uint64_t> latest_parent_completion_ns_;
+    std::unordered_map<uint64_t, std::shared_ptr<Chakra::ETFeederNode>> pending_memory_waits_;
 };
 
 }  // namespace AstraSim
