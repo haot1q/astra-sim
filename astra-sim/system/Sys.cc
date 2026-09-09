@@ -1505,6 +1505,17 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
     scheduler_unit->notify_stream_added(stream->current_queue_id);
 }
 
+void Sys::rethrow_native_tag_failure() const {
+    if (native_tags_) native_tags_->rethrow_failure();
+}
+
+void Sys::bind_native_tags(NativeTagRegistry* registry) {
+    if (!registry || (native_tags_ && native_tags_ != registry)) {
+        throw std::invalid_argument("Sys NATIVE tag registry ownership mismatch");
+    }
+    native_tags_ = registry;
+}
+
 int Sys::front_end_sim_send(Tick delay,
                             void* buffer,
                             uint64_t count,
@@ -1514,24 +1525,36 @@ int Sys::front_end_sim_send(Tick delay,
                             sim_request* request,
                             Sys::FrontEndSendRecvType send_type,
                             void (*msg_handler)(void* fun_arg),
-                            void* fun_arg) {
-    if (send_type == Sys::FrontEndSendRecvType::NATIVE) {
-        tag = tag % (Sys::FrontEndSendRecvType::COLLECTIVE -
-                     Sys::FrontEndSendRecvType::NATIVE) +
-              Sys::FrontEndSendRecvType::NATIVE;
-    } else if (send_type == Sys::FrontEndSendRecvType::COLLECTIVE) {
-        tag = tag % (Sys::FrontEndSendRecvType::RENDEZVOUS -
-                     Sys::FrontEndSendRecvType::COLLECTIVE) +
-              Sys::FrontEndSendRecvType::COLLECTIVE;
-    } else {
-        sys_panic("A type of RENDZVOUS should never issued in frontend");
-    }
-    if (rendezvous_enabled) {
-        return rendezvous_sim_send(delay, buffer, count, type, dst, tag,
-                                   request, msg_handler, fun_arg);
-    } else {
-        return sim_send(delay, buffer, count, type, dst, tag, request,
-                        msg_handler, fun_arg);
+                            void* fun_arg,
+                            uint64_t native_tag_generation) {
+    try {
+        if (send_type == Sys::FrontEndSendRecvType::NATIVE) {
+            tag = NativeTagRegistry::normalize(tag);
+            if (native_tags_) {
+                const auto callback = native_tags_->observe(id, dst, tag, count, true,
+                    native_tag_generation, {msg_handler, fun_arg});
+                msg_handler = callback.function;
+                fun_arg = callback.argument;
+            } else if (native_tag_generation) {
+                throw std::invalid_argument("NATIVE tag lease has no run registry");
+            }
+        } else if (send_type == Sys::FrontEndSendRecvType::COLLECTIVE) {
+            tag = tag % (Sys::FrontEndSendRecvType::RENDEZVOUS -
+                         Sys::FrontEndSendRecvType::COLLECTIVE) +
+                  Sys::FrontEndSendRecvType::COLLECTIVE;
+        } else {
+            sys_panic("A type of RENDZVOUS should never issued in frontend");
+        }
+        if (rendezvous_enabled) {
+            return rendezvous_sim_send(delay, buffer, count, type, dst, tag,
+                                       request, msg_handler, fun_arg);
+        } else {
+            return sim_send(delay, buffer, count, type, dst, tag, request,
+                            msg_handler, fun_arg);
+        }
+    } catch (...) {
+        if (native_tags_) native_tags_->record_failure(std::current_exception());
+        throw;
     }
 }
 
@@ -1544,24 +1567,36 @@ int Sys::front_end_sim_recv(Tick delay,
                             sim_request* request,
                             Sys::FrontEndSendRecvType recv_type,
                             void (*msg_handler)(void* fun_arg),
-                            void* fun_arg) {
-    if (recv_type == Sys::FrontEndSendRecvType::NATIVE) {
-        tag = tag % (Sys::FrontEndSendRecvType::COLLECTIVE -
-                     Sys::FrontEndSendRecvType::NATIVE) +
-              Sys::FrontEndSendRecvType::NATIVE;
-    } else if (recv_type == Sys::FrontEndSendRecvType::COLLECTIVE) {
-        tag = tag % (Sys::FrontEndSendRecvType::RENDEZVOUS -
-                     Sys::FrontEndSendRecvType::COLLECTIVE) +
-              Sys::FrontEndSendRecvType::COLLECTIVE;
-    } else {
-        sys_panic("A type of RENDZVOUS should never issued in frontend");
-    }
-    if (rendezvous_enabled) {
-        return rendezvous_sim_recv(delay, buffer, count, type, src, tag,
-                                   request, msg_handler, fun_arg);
-    } else {
-        return sim_recv(delay, buffer, count, type, src, tag, request,
-                        msg_handler, fun_arg);
+                            void* fun_arg,
+                            uint64_t native_tag_generation) {
+    try {
+        if (recv_type == Sys::FrontEndSendRecvType::NATIVE) {
+            tag = NativeTagRegistry::normalize(tag);
+            if (native_tags_) {
+                const auto callback = native_tags_->observe(src, id, tag, count, false,
+                    native_tag_generation, {msg_handler, fun_arg});
+                msg_handler = callback.function;
+                fun_arg = callback.argument;
+            } else if (native_tag_generation) {
+                throw std::invalid_argument("NATIVE tag lease has no run registry");
+            }
+        } else if (recv_type == Sys::FrontEndSendRecvType::COLLECTIVE) {
+            tag = tag % (Sys::FrontEndSendRecvType::RENDEZVOUS -
+                         Sys::FrontEndSendRecvType::COLLECTIVE) +
+                  Sys::FrontEndSendRecvType::COLLECTIVE;
+        } else {
+            sys_panic("A type of RENDZVOUS should never issued in frontend");
+        }
+        if (rendezvous_enabled) {
+            return rendezvous_sim_recv(delay, buffer, count, type, src, tag,
+                                       request, msg_handler, fun_arg);
+        } else {
+            return sim_recv(delay, buffer, count, type, src, tag, request,
+                            msg_handler, fun_arg);
+        }
+    } catch (...) {
+        if (native_tags_) native_tags_->record_failure(std::current_exception());
+        throw;
     }
 }
 

@@ -12,6 +12,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 #include <vector>
 
 #include "astra-sim/system/Callable.hh"
+#include "astra-sim/system/NativeTagRegistry.hh"
 
 namespace AstraSim {
 
@@ -24,6 +25,7 @@ class PdKvTransferExecutor : public Callable {
     void submit(const std::string& descriptor_path, uint64_t ready_ns);
     void call(EventType event, CallData* data) override;
     bool drained() const;
+    void rethrow_failure() const;
 
   private:
     struct RankPair {
@@ -48,11 +50,14 @@ class PdKvTransferExecutor : public Callable {
         std::vector<RankPair> rank_pairs;
         std::vector<bool> send_complete;
         std::vector<bool> recv_complete;
+        std::vector<NativeTagLease> tag_leases;
     };
 
     void finish_if_complete(uint64_t transfer_index);
+    void lease_tags(Transfer& transfer);
 
     std::vector<Sys*> systems_;
+    NativeTagRegistry native_tags_;
     std::map<uint64_t, std::unique_ptr<Transfer>> transfers_;
     uint64_t next_transfer_index_ = 0;
 };

@@ -31,6 +31,9 @@ file(GLOB srcs_congestion_aware
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(AstraSim_NativeTagRegistry_Test tests/NativeTagRegistryTest.cc)
+    target_link_libraries(AstraSim_NativeTagRegistry_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_NativeTagRegistry_Test COMMAND AstraSim_NativeTagRegistry_Test)
     add_executable(AstraSim_MemoryTierConfig_Test
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/MemoryTierConfigTest.cc)
     target_link_libraries(AstraSim_MemoryTierConfig_Test PRIVATE AstraSim)
@@ -70,6 +73,18 @@ endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     if(BUILD_TESTING)
+        add_executable(AstraSim_NativeTagEvent_Test tests/NativeTagEventTest.cc
+            congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+        target_link_libraries(AstraSim_NativeTagEvent_Test PRIVATE
+            AstraSim Analytical_Congestion_Unaware)
+        target_include_directories(AstraSim_NativeTagEvent_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
+        add_test(NAME AstraSim_NativeTagEvent_Test COMMAND AstraSim_NativeTagEvent_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json)
+        add_test(NAME AstraSim_NativeTagLateReceive_Test COMMAND AstraSim_NativeTagEvent_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json ordinary_late)
         add_executable(AstraSim_PhysicalServiceEvent_Test
             tests/PhysicalServiceEventTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})

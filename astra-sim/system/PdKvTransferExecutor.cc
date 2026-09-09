@@ -48,10 +48,30 @@ std::string require_string(const json& value, const char* field) {
 }  // namespace
 
 PdKvTransferExecutor::PdKvTransferExecutor(const std::vector<Sys*>& systems)
-    : systems_(systems) {}
+    : systems_(systems) {
+    for (auto* system : systems_) system->bind_native_tags(&native_tags_);
+}
+
+void PdKvTransferExecutor::lease_tags(Transfer& transfer) {
+    try {
+        for (auto& pair : transfer.rank_pairs) {
+            auto lease = native_tags_.acquire(pair.source_rank, pair.destination_rank,
+                                              pair.bytes, pair.tag);
+            transfer.tag_leases.push_back(lease);
+            pair.tag = lease.tag;
+        }
+    } catch (...) {
+        // No backend work has been published; only these new leases are undone.
+        for (const auto& lease : transfer.tag_leases) {
+            native_tags_.discard_unsubmitted(lease);
+        }
+        throw;
+    }
+}
 
 void PdKvTransferExecutor::submit(const std::string& descriptor_path,
                                   uint64_t ready_ns) {
+    rethrow_failure();
     std::ifstream stream(descriptor_path);
     if (!stream.good()) {
         throw std::runtime_error("cannot open P/D descriptor: " + descriptor_path);
@@ -108,6 +128,11 @@ void PdKvTransferExecutor::submit(const std::string& descriptor_path,
     if (bytes_sum != transfer->charged_bytes) {
         throw std::runtime_error("P/D rank-pair bytes differ from aggregate");
     }
+    if (next_transfer_index_ >= (uint64_t{1} << 31) ||
+        transfer->rank_pairs.size() > UINT32_MAX) {
+        throw std::runtime_error("P/D callback identity space exhausted");
+    }
+    lease_tags(*transfer);
 
     const uint64_t transfer_index = next_transfer_index_++;
     transfer->send_complete.assign(transfer->rank_pairs.size(), false);
@@ -122,11 +147,11 @@ void PdKvTransferExecutor::submit(const std::string& descriptor_path,
         recv_data->wlhd = new WorkloadLayerHandlerData;
         recv_data->wlhd->node_id = (transfer_index << 32) | pair_index;
         recv_data->event = EventType::PacketReceived;
-        sim_request recv_request;
+        sim_request recv_request{};
         systems_[pair.destination_rank]->front_end_sim_recv(
             0, Sys::dummy_data, pair.bytes, UINT8, pair.source_rank, pair.tag,
             &recv_request, Sys::FrontEndSendRecvType::NATIVE,
-            &Sys::handleEvent, recv_data);
+            &Sys::handleEvent, recv_data, active.tag_leases[pair_index].generation);
 
         auto* send_data = new SendPacketEventHandlerData;
         send_data->callable = this;
@@ -134,11 +159,11 @@ void PdKvTransferExecutor::submit(const std::string& descriptor_path,
         send_data->wlhd->node_id = kCallbackDirectionBit |
             (transfer_index << 32) | pair_index;
         send_data->event = EventType::PacketSent;
-        sim_request send_request;
+        sim_request send_request{};
         systems_[pair.source_rank]->front_end_sim_send(
             0, Sys::dummy_data, pair.bytes, UINT8, pair.destination_rank, pair.tag,
             &send_request, Sys::FrontEndSendRecvType::NATIVE,
-            &Sys::handleEvent, send_data);
+            &Sys::handleEvent, send_data, active.tag_leases[pair_index].generation);
     }
 }
 
@@ -171,6 +196,7 @@ void PdKvTransferExecutor::call(EventType event, CallData* data) {
 }
 
 void PdKvTransferExecutor::finish_if_complete(uint64_t transfer_index) {
+    rethrow_failure();
     auto& transfer = *transfers_.at(transfer_index);
     const auto all_complete = [](const std::vector<bool>& values) {
         return std::all_of(values.begin(), values.end(), [](bool value) { return value; });
@@ -197,12 +223,17 @@ void PdKvTransferExecutor::finish_if_complete(uint64_t transfer_index) {
         {"transport", transfer.transport},
         {"status", "success"},
     };
+    for (const auto& lease : transfer.tag_leases) native_tags_.release(lease);
     std::cout << "PD_KV_TRANSFER_COMPLETE " << receipt.dump() << std::endl;
     transfers_.erase(transfer_index);
 }
 
 bool PdKvTransferExecutor::drained() const {
-    return transfers_.empty();
+    return transfers_.empty() && native_tags_.drained();
+}
+
+void PdKvTransferExecutor::rethrow_failure() const {
+    native_tags_.rethrow_failure();
 }
 
 }  // namespace AstraSim

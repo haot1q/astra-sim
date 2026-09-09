@@ -257,6 +257,7 @@ int main(int argc, char* argv[]) {
     bool exit = false;
     bool exit_requested = false;
     while (!exit) {
+      pd_kv_executor.rethrow_failure();
       preparation_executor.rethrow_failure();
       for (const auto* system : systems) {
         system->memory_movement_executor->rethrow_failure();
@@ -276,6 +277,7 @@ int main(int argc, char* argv[]) {
 
       services.rethrow_failure();
       preparation_executor.rethrow_failure();
+      pd_kv_executor.rethrow_failure();
       for (const auto* system : systems) {
         system->memory_movement_executor->rethrow_failure();
       }

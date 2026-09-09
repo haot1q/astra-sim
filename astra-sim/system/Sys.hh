@@ -17,6 +17,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CommunicatorGroup.hh"
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MemoryTierRegistry.hh"
+#include "astra-sim/system/NativeTagRegistry.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/Roofline.hh"
@@ -206,7 +207,8 @@ class Sys : public Callable {
                            sim_request* request,
                            FrontEndSendRecvType send_type,
                            void (*msg_handler)(void* fun_arg),
-                           void* fun_arg);
+                           void* fun_arg,
+                           uint64_t native_tag_generation = 0);
 
     int front_end_sim_recv(Tick delay,
                            void* buffer,
@@ -217,7 +219,11 @@ class Sys : public Callable {
                            sim_request* request,
                            FrontEndSendRecvType recv_type,
                            void (*msg_handler)(void* fun_arg),
-                           void* fun_arg);
+                           void* fun_arg,
+                           uint64_t native_tag_generation = 0);
+
+    void bind_native_tags(NativeTagRegistry* registry);
+    void rethrow_native_tag_failure() const;
 
     int rendezvous_sim_send(Tick delay,
                             void* buffer,
@@ -351,6 +357,9 @@ class Sys : public Callable {
 
     // skip simulation for all nodes and use current duration
     bool replay_only;
+
+  private:
+    NativeTagRegistry* native_tags_ = nullptr;
 };
 
 }  // namespace AstraSim
