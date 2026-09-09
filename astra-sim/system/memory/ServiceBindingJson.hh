@@ -16,11 +16,13 @@ namespace AstraSim::ServiceBindingJson {
 
 using Json = nlohmann::json;
 Json read(const std::string& path);
+Json parse(const std::string& text);
 void fields(const Json& raw, std::initializer_list<const char*> expected);
 uint32_t uint32(const Json& raw);
 std::string name(const Json& raw);
 const Json& array(const Json& raw);
 std::string digest(const Json& body, bool ensure_ascii = false);
+std::string digest_bytes(const std::string& canonical);
 
 }  // namespace AstraSim::ServiceBindingJson
 

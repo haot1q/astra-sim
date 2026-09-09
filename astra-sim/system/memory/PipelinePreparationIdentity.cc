@@ -25,6 +25,14 @@ PipelinePreparationIdentity validate_pipeline_preparation_identity(
     const Json& work, const PhysicalServiceFactory& services) {
     const auto& stage = work.at("pipeline_stage");
     const auto& endpoint = work.at("endpoint");
+    const auto& identity = stage.at("owner_identity");
+    require(Wire::uint32(work.at("backend_instance_id")) == Wire::uint32(endpoint.at("instance_id")) &&
+            identity.at("registry_instance_id") == work.at("instance_id"));
+    return validate_pipeline_stage_identity(stage, endpoint, services.configuration());
+}
+
+PipelinePreparationIdentity validate_pipeline_stage_identity(
+    const Json& stage, const Json& endpoint, const PhysicalServiceConfig& physical) {
     Wire::fields(stage, {"binding", "owner_identity"});
     const auto& binding = stage.at("binding");
     const auto& identity = stage.at("owner_identity");
@@ -40,9 +48,7 @@ PipelinePreparationIdentity validate_pipeline_preparation_identity(
     for (const auto* key : {"block_size_tokens", "kv_dim", "kv_dtype_bytes"}) require(Wire::uint32(endpoint.at(key)) > 0);
     const auto instance = Wire::uint32(endpoint.at("instance_id"));
     const auto node = Wire::uint32(identity.at("backend_node_id"));
-    require(Wire::uint32(work.at("backend_instance_id")) == instance &&
-            Wire::uint32(identity.at("backend_instance_id")) == instance &&
-            identity.at("registry_instance_id") == work.at("instance_id") &&
+    require(Wire::uint32(identity.at("backend_instance_id")) == instance &&
             binding.at("registry_instance_id") == identity.at("registry_instance_id") &&
             binding.at("page_instance_id") == identity.at("page_instance_id"));
     const auto tp = Wire::uint32(endpoint.at("tp_size"));
@@ -53,7 +59,7 @@ PipelinePreparationIdentity validate_pipeline_preparation_identity(
     const auto stage_id = Wire::uint32(binding.at("stage_id"));
     require(tp > 0 && pp > 0 && layers >= pp && stage_id < pp &&
             static_cast<uint64_t>(tp) * pp == count &&
-            static_cast<uint64_t>(first) + count <= services.configuration().ranks.size());
+            static_cast<uint64_t>(first) + count <= physical.ranks.size());
     const auto remainder = layers % pp;
     const auto first_extra = pp - remainder - 1;
     const auto boundary = [&](uint32_t stage) {
@@ -63,7 +69,7 @@ PipelinePreparationIdentity validate_pipeline_preparation_identity(
     require(Wire::uint32(binding.at("layer_start")) == boundary(stage_id) &&
             Wire::uint32(binding.at("layer_end")) == boundary(stage_id + 1));
     std::set<uint32_t> actual;
-    for (const auto& [rank, owner] : services.configuration().ranks) {
+    for (const auto& [rank, owner] : physical.ranks) {
         if (owner.at("instance_id") == instance) {
             require(owner.at("node_id") == node && first <= rank && rank < first + count);
             actual.insert(rank);

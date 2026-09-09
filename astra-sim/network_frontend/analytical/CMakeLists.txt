@@ -31,6 +31,8 @@ file(GLOB srcs_congestion_aware
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(AstraSim_PdPathWork_Test tests/PdPathWorkTest.cc)
+    target_link_libraries(AstraSim_PdPathWork_Test PRIVATE AstraSim)
     add_executable(AstraSim_NativeTagRegistry_Test tests/NativeTagRegistryTest.cc)
     target_link_libraries(AstraSim_NativeTagRegistry_Test PRIVATE AstraSim)
     add_test(NAME AstraSim_NativeTagRegistry_Test COMMAND AstraSim_NativeTagRegistry_Test)

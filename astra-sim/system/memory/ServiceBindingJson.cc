@@ -21,6 +21,12 @@ namespace AstraSim::ServiceBindingJson {
 Json read(const std::string& path) {
     std::ifstream stream(path);
     if (!stream) throw std::invalid_argument("cannot open physical service bindings");
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    return parse(contents.str());
+}
+
+Json parse(const std::string& text) {
     std::vector<std::set<std::string>> keys;
     auto callback = [&keys](int, Json::parse_event_t event, Json& value) {
         if (event == Json::parse_event_t::object_start) keys.emplace_back();
@@ -31,7 +37,7 @@ Json read(const std::string& path) {
         if (event == Json::parse_event_t::object_end) keys.pop_back();
         return true;
     };
-    return Json::parse(stream, callback);
+    return Json::parse(text, callback);
 }
 
 void fields(const Json& raw, std::initializer_list<const char*> expected) {
@@ -79,6 +85,10 @@ void reject_floats(const Json& value) {
 std::string digest(const Json& body, bool ensure_ascii) {
     reject_floats(body);
     const auto canonical = body.dump(-1, ' ', ensure_ascii);
+    return digest_bytes(canonical);
+}
+
+std::string digest_bytes(const std::string& canonical) {
     unsigned char bytes[EVP_MAX_MD_SIZE];
     unsigned int length = 0;
     if (EVP_Digest(canonical.data(), canonical.size(), bytes, &length,

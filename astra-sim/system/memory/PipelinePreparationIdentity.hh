@@ -11,11 +11,15 @@ This source code is licensed under the MIT license found in the root LICENSE.
 
 namespace AstraSim {
 class PhysicalServiceFactory;
+struct PhysicalServiceConfig;
 struct PipelinePreparationIdentity {
     std::vector<uint32_t> ranks;
     std::string digest;
 };
 // Provenance only: no Page state, capacity, or transfer authority.
+PipelinePreparationIdentity validate_pipeline_stage_identity(
+    const nlohmann::json& stage, const nlohmann::json& endpoint,
+    const PhysicalServiceConfig& physical);
 PipelinePreparationIdentity validate_pipeline_preparation_identity(
     const nlohmann::json& work, const PhysicalServiceFactory& services);
 }
