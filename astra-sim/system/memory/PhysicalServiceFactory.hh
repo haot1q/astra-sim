@@ -14,6 +14,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/memory/PhysicalServiceAdapter.hh"
 #include "astra-sim/system/memory/PhysicalServiceConfig.hh"
+#include "astra-sim/system/memory/PdPathServiceConfig.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 
 namespace Analytical { class AnalyticalMemory; }
@@ -30,12 +31,15 @@ struct RankServiceBindings {
 class PhysicalServiceFactory {
   public:
     PhysicalServiceFactory(const MemoryTierConfigSet& memory,
-                           const std::string& binding_path, uint32_t rank_count);
+                           const std::string& binding_path, uint32_t rank_count,
+                           const std::string& pd_path_binding_path = "");
     ~PhysicalServiceFactory();
     const RankServiceBindings& at(uint32_t rank) const;
     const ServiceBindingIdentity& identity() const;
     const PhysicalServiceConfig& configuration() const { return config_; }
     void rethrow_failure() const;
+    AstraMemoryAPI* pd_interface(uint32_t rank, const std::string& interface_id) const;
+    const PdPathServiceConfig& pd_path_config() const;
 
   private:
     AstraMemoryAPI* own(nlohmann::json backend, bool physical);
@@ -45,12 +49,14 @@ class PhysicalServiceFactory {
     void legacy_backends(const MemoryTierConfigSet& memory);
 
     PhysicalServiceConfig config_;
+    PdPathServiceConfig pd_config_;
     bool native_;
     std::vector<std::unique_ptr<Analytical::AnalyticalMemory>> memories_;
     std::map<std::string, AstraMemoryAPI*> physical_;
     std::map<ServiceEndpoint, AstraMemoryAPI*> legacy_;
     std::vector<std::unique_ptr<PhysicalServiceAdapter>> adapters_;
     std::vector<RankServiceBindings> ranks_;
+    std::map<std::pair<uint32_t, std::string>, AstraMemoryAPI*> interfaces_;
 };
 
 }  // namespace AstraSim

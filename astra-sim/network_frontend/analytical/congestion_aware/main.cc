@@ -91,7 +91,8 @@ int main(int argc, char* argv[]) {
 
     const auto memory_config = load_memory_tier_config(memory_configuration);
     PhysicalServiceFactory services(memory_config,
-        cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count);
+        cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count,
+        cmd_line_parser.get<std::string>("pd-path-service-bindings"));
 
     auto systems = std::vector<Sys*>();
 

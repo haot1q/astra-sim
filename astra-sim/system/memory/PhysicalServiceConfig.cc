@@ -262,6 +262,7 @@ PhysicalServiceConfig load_physical_service_config(
     }
     PhysicalServiceConfig result{{digest, activation}, {}, std::move(bindings.backends)};
     result.ranks = rank_rows;
+    result.resources = resources;
     for (const auto& [key, row] : bindings.rows) {
         result.bindings.emplace(key, row["physical_resource_ref"]);
     }

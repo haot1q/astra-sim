@@ -191,13 +191,18 @@ BandwidthResource::BandwidthResource(BandwidthResourceConfig config)
 uint64_t BandwidthResource::service_time_ns(
     uint64_t bytes,
     MemoryOperation operation,
-    uint64_t latency_ns) const {
+    uint64_t latency_ns,
+    MemoryTimeRounding rounding) const {
+    if (rounding != MemoryTimeRounding::Floor && rounding != MemoryTimeRounding::Ceil) {
+        throw std::invalid_argument("unknown memory time rounding mode");
+    }
     if (bytes == 0) {
         throw std::invalid_argument("memory request bytes must be positive");
     }
     const uint64_t bandwidth = bandwidth_for(config_, operation);
     const unsigned __int128 transfer_ns =
-        static_cast<unsigned __int128>(bytes) * 1'000'000'000ULL /
+        (static_cast<unsigned __int128>(bytes) * 1'000'000'000ULL +
+         (rounding == MemoryTimeRounding::Ceil ? bandwidth - 1 : 0)) /
         bandwidth;
     const unsigned __int128 total_ns = transfer_ns + latency_ns;
     if (total_ns > std::numeric_limits<uint64_t>::max()) {

@@ -45,7 +45,8 @@ class BandwidthResource {
     uint64_t service_time_ns(
         uint64_t bytes,
         MemoryOperation operation,
-        uint64_t latency_ns = 0) const;
+        uint64_t latency_ns = 0,
+        MemoryTimeRounding rounding = MemoryTimeRounding::Floor) const;
     std::size_t server_index(MemoryOperation operation) const;
     std::size_t server_count() const;
     uint64_t turnaround_delay_ns(

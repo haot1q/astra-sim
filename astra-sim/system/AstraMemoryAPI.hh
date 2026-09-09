@@ -23,9 +23,15 @@ enum class MemoryOperation : uint8_t {
   Write = 2,
 };
 
+enum class MemoryTimeRounding : uint8_t {
+  Floor = 1,
+  Ceil = 2,
+};
+
 struct MemoryRequest {
   uint64_t bytes;
   MemoryOperation operation;
+  MemoryTimeRounding rounding = MemoryTimeRounding::Floor;
 };
 
 class Sys;

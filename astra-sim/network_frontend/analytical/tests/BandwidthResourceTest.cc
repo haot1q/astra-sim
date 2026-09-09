@@ -112,6 +112,27 @@ bool contract_holds() {
 
 }  // namespace
 
+bool rounding_holds() {
+    using namespace AstraSim;
+    const BandwidthResource resource({3'000'000'000ULL, 3'000'000'000ULL,
+        std::nullopt, BandwidthConcurrency::Simultaneous, 0});
+    for (auto operation : {MemoryOperation::Read, MemoryOperation::Write}) {
+        if (resource.service_time_ns(4, operation) != 1 ||
+            resource.service_time_ns(4, operation, 7, MemoryTimeRounding::Ceil) != 9 ||
+            resource.service_time_ns(3, operation, 7, MemoryTimeRounding::Ceil) != 8 ||
+            resource.service_time_ns(1, operation, 0, MemoryTimeRounding::Ceil) != 1) {
+            return false;
+        }
+    }
+    return throws<std::invalid_argument>([&]() {
+        resource.service_time_ns(1, MemoryOperation::Read, 0,
+                                static_cast<MemoryTimeRounding>(255));
+    }) && throws<std::overflow_error>([&]() {
+        resource.service_time_ns(1, MemoryOperation::Read, UINT64_MAX,
+                                 MemoryTimeRounding::Ceil);
+    });
+}
+
 int main() {
-    return contract_holds() ? 0 : 1;
+    return contract_holds() && rounding_holds() ? 0 : 1;
 }

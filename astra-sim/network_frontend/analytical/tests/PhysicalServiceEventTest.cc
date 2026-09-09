@@ -67,6 +67,13 @@ void seal(Json& document) {
     });
     binding["binding_digest"] = Wire::digest(binding);
     binding["activation_id"] = "event-test-run";
+    if (document.contains("pd_path_services")) {
+        auto& path = document["pd_path_services"];
+        path["service_binding_digest"] = binding["binding_digest"];
+        path["service_activation_id"] = binding["activation_id"];
+        path.erase("binding_digest");
+        path["binding_digest"] = Wire::digest(path, true);
+    }
 }
 
 void write_empty_et(const std::filesystem::path& root, const Json& document, uint32_t rank) {
@@ -106,6 +113,9 @@ struct RequestPattern {
     uint64_t bytes = 1024;
     uint64_t second_bytes = 0;
     uint32_t second_tier = 16;
+    std::string interface_id;
+    bool first_memory = false;
+    uint64_t first_finish = 0;
 };
 
 void run_events(Json document, const char* name, uint64_t second_finish,
@@ -132,7 +142,12 @@ void run_events(Json document, const char* name, uint64_t second_finish,
     Network::set_event_queue(events);
     Network::set_topology(topology);
     const auto memory = load_memory_tier_config((root / "memory.json").string());
-    PhysicalServiceFactory services(memory, (root / "binding.json").string(), 2);
+    std::string pd_path;
+    if (document.contains("pd_path_services")) {
+        pd_path = (root / "pd-path.json").string();
+        write_json(pd_path, document["pd_path_services"]);
+    }
+    PhysicalServiceFactory services(memory, (root / "binding.json").string(), 2, pd_path);
     std::vector<std::unique_ptr<Network>> networks;
     std::vector<std::unique_ptr<Sys>> systems;
     for (int rank = 0; rank < 2; ++rank) {
@@ -149,7 +164,11 @@ void run_events(Json document, const char* name, uint64_t second_finish,
         requests[rank].sys_id = rank;
         requests[rank].device_id = pattern.device;
         requests[rank].completion_target = &completion;
-        systems[rank]->memory_api(rank == 0 ? 16 : pattern.second_tier, pattern.device)->issue(
+        auto* api = pattern.interface_id.empty() || (rank == 0 && pattern.first_memory)
+            ? systems[rank]->memory_api(rank == 0 ? 16 : pattern.second_tier, pattern.device)
+            : services.pd_interface(rank, pattern.interface_id);
+        api->set_sys(rank, systems[rank].get());
+        api->issue(
             {rank == 1 && pattern.second_bytes != 0 ? pattern.second_bytes : pattern.bytes,
              rank == 0 ? MemoryOperation::Read : pattern.second}, &requests[rank]);
     }
@@ -159,7 +178,9 @@ void run_events(Json document, const char* name, uint64_t second_finish,
         services.rethrow_failure();
     }
     require(completion.calls == 2, "missing or duplicate memory callback");
-    require(requests[0].memory_finish_ns == pattern.bytes, "first service runtime changed");
+    require(requests[0].memory_finish_ns ==
+                (pattern.first_finish ? pattern.first_finish : pattern.bytes),
+            "first service runtime changed");
     require(requests[1].memory_finish_ns == second_finish, "incorrect physical resource contention");
     require(requests[0].device_id == pattern.device && requests[1].device_id == pattern.device,
             "logical device ID changed");
@@ -237,9 +258,25 @@ void logical_alias(Json input) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 2) throw std::invalid_argument("expected golden fixture path");
+        if (argc != 2 && argc != 4 && argc != 5) {
+            throw std::invalid_argument("expected golden fixture path and optional interface request");
+        }
         LoggerFactory::init("empty");
-        const auto golden = Wire::read(argv[1]);
+        auto golden = Wire::read(argv[1]);
+        if (argc >= 4) {
+            golden["pd_path_services"] = Wire::read(argv[2]);
+            RequestPattern pattern;
+            pattern.bytes = 1;
+            pattern.interface_id = "pcie";
+            if (argc == 5) {
+                require(std::string(argv[4]) == "memory-alias", "unknown interface test mode");
+                pattern.first_memory = true;
+                pattern.bytes = 4;
+                pattern.first_finish = 1;
+            }
+            run_events(golden, "pd-interface", std::stoull(argv[3]), pattern);
+            return 0;
+        }
         auto manifest = golden["manifest"];
         manifest.erase("manifest_digest");
         require(Wire::digest(manifest) == golden["manifest"]["manifest_digest"], "Python SHA golden mismatch");

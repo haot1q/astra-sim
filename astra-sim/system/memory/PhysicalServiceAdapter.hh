@@ -16,7 +16,8 @@ namespace AstraSim {
 // Non-owning, rank-local logical-device router. Physical queues belong to factory.
 class PhysicalServiceAdapter : public AstraMemoryAPI {
   public:
-    PhysicalServiceAdapter(uint32_t rank, std::vector<AstraMemoryAPI*> devices);
+    PhysicalServiceAdapter(uint32_t rank, std::vector<AstraMemoryAPI*> devices,
+                           MemoryTimeRounding rounding = MemoryTimeRounding::Floor);
     void set_sys(int id, Sys* sys) override;
     void issue(const MemoryRequest& request, WorkloadLayerHandlerData* handler) override;
     MemoryLocationType get_memory_location_type() const override;
@@ -24,6 +25,7 @@ class PhysicalServiceAdapter : public AstraMemoryAPI {
 
   private:
     uint32_t rank_;
+    MemoryTimeRounding rounding_;
     std::vector<AstraMemoryAPI*> devices_;
     Sys* sys_ = nullptr;
     std::exception_ptr failure_;

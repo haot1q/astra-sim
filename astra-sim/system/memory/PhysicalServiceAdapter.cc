@@ -14,11 +14,14 @@ LICENSE file in the root directory of this source tree.
 namespace AstraSim {
 
 PhysicalServiceAdapter::PhysicalServiceAdapter(
-    uint32_t rank, std::vector<AstraMemoryAPI*> devices)
-    : rank_(rank), devices_(std::move(devices)) {
+    uint32_t rank, std::vector<AstraMemoryAPI*> devices, MemoryTimeRounding rounding)
+    : rank_(rank), rounding_(rounding), devices_(std::move(devices)) {
     if (devices_.empty() ||
         std::any_of(devices_.begin(), devices_.end(), [](auto* api) { return api == nullptr; })) {
         throw std::invalid_argument("physical service adapter requires complete device bindings");
+    }
+    if (rounding != MemoryTimeRounding::Floor && rounding != MemoryTimeRounding::Ceil) {
+        throw std::invalid_argument("invalid physical service rounding mode");
     }
 }
 
@@ -44,7 +47,9 @@ void PhysicalServiceAdapter::issue(
             throw std::invalid_argument("invalid physical memory operation");
         }
         handler->service_device_id = 0;
-        devices_.at(handler->device_id)->issue(request, handler);
+        auto physical_request = request;
+        physical_request.rounding = rounding_;
+        devices_.at(handler->device_id)->issue(physical_request, handler);
     } catch (...) {
         // Sys::call_events catches callbacks. Preserve failure for the frontend
         // to rethrow rather than allowing a malformed request to report success.

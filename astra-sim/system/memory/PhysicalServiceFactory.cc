@@ -14,21 +14,31 @@ LICENSE file in the root directory of this source tree.
 namespace AstraSim {
 
 PhysicalServiceFactory::PhysicalServiceFactory(
-    const MemoryTierConfigSet& memory, const std::string& binding_path, uint32_t rank_count)
+    const MemoryTierConfigSet& memory, const std::string& binding_path, uint32_t rank_count,
+    const std::string& pd_path_binding_path)
     : native_(memory.native) {
     if (native_) {
         config_ = load_physical_service_config(binding_path, memory, rank_count);
+        pd_config_ = load_pd_path_service_config(pd_path_binding_path, config_);
         for (const auto& [ref, backend] : config_.backends) {
             physical_.emplace(ref, own(backend, true));
         }
+        for (const auto& [ref, backend] : pd_config_.declared_backends) {
+            physical_.emplace(ref, own(backend, true));
+        }
     } else {
-        if (!binding_path.empty()) {
+        if (!binding_path.empty() || !pd_path_binding_path.empty()) {
             throw std::invalid_argument("legacy memory cannot use physical service bindings");
         }
         legacy_backends(memory);
     }
     for (uint32_t rank = 0; rank < rank_count; ++rank) {
         ranks_.push_back(rank_bindings(memory, rank));
+    }
+    for (const auto& [key, ref] : pd_config_.bindings) {
+        adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(key.first,
+            std::vector<AstraMemoryAPI*>{physical_.at(ref)}, pd_config_.rounding.at(ref)));
+        interfaces_.emplace(key, adapters_.back().get());
     }
 }
 
@@ -103,6 +113,17 @@ const RankServiceBindings& PhysicalServiceFactory::at(uint32_t rank) const {
 
 const ServiceBindingIdentity& PhysicalServiceFactory::identity() const {
     return config_.identity;
+}
+
+AstraMemoryAPI* PhysicalServiceFactory::pd_interface(
+    uint32_t rank, const std::string& interface_id) const {
+    const auto found = interfaces_.find({rank, interface_id});
+    if (found == interfaces_.end()) throw std::invalid_argument("unbound P/D physical interface");
+    return found->second;
+}
+
+const PdPathServiceConfig& PhysicalServiceFactory::pd_path_config() const {
+    return pd_config_;
 }
 
 void PhysicalServiceFactory::rethrow_failure() const {
