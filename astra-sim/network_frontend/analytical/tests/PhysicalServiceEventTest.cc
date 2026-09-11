@@ -101,9 +101,10 @@ struct Completion : Callable {
         auto* handler = static_cast<TaggedHandler*>(data);
         require(handler->marker == 42, "handler dynamic state was lost");
         ++calls;
-        std::cout << "RECEIPT rank=" << handler->sys_id << " logical_device=" << handler->device_id
-                  << " ready=" << handler->memory_ready_ns << " start=" << handler->memory_start_ns
-                  << " finish=" << handler->memory_finish_ns << std::endl;
+        LoggerFactory::get_logger("physical-service-test")->info(
+            "RECEIPT rank={} logical_device={} ready={} start={} finish={}",
+            handler->sys_id, handler->device_id, handler->memory_ready_ns,
+            handler->memory_start_ns, handler->memory_finish_ns);
     }
 };
 
@@ -184,7 +185,8 @@ void run_events(Json document, const char* name, uint64_t second_finish,
     require(requests[1].memory_finish_ns == second_finish, "incorrect physical resource contention");
     require(requests[0].device_id == pattern.device && requests[1].device_id == pattern.device,
             "logical device ID changed");
-    std::cout << "PASS " << name << " evidence=" << root << std::endl;
+    LoggerFactory::get_logger("physical-service-test")->info(
+        "PASS {} evidence={}", name, root.string());
 }
 
 Json shared(Json input, const char* owner) {
