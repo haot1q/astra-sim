@@ -58,6 +58,8 @@ int main(int argc, char* argv[]) {
         cmd_line_parser.get<std::vector<int>>("start-npu-ids");
     auto end_npu_ids =
         cmd_line_parser.get<std::vector<int>>("end-npu-ids");
+    const bool rank_notifications =
+        cmd_line_parser.get<bool>("rank-completion-notifications");
 
     // clear vector if default value is used
     if (start_npu_ids.size() == 1 && start_npu_ids[0] == -1) {
@@ -172,6 +174,7 @@ int main(int argc, char* argv[]) {
 
     // Initiate simulation
     for (int i = 0; i < npus_count; i++) {
+        systems[i]->workload->emit_rank_completions = rank_notifications;
         systems[i]->workload->fire();
         // For debugging
         // systems[i]->workload->et_feeder->printGraph();
@@ -263,6 +266,7 @@ int main(int argc, char* argv[]) {
     };
     bool exit = false;
     bool exit_requested = false;
+    std::vector<uint64_t> observed_rank_completions(npus_count, 0);
     while (!exit) {
       pd_kv_executor.rethrow_failure();
       preparation_executor.rethrow_failure();
@@ -297,6 +301,19 @@ int main(int argc, char* argv[]) {
       if (exit_requested) {
         exit = all_systems_drained();
         continue;
+      }
+
+      // A managed middle rank may finish after both handshake endpoints passed.
+      // Wake existing endpoints; notifications never add an stdin obligation.
+      if (rank_notifications) {
+        for (int rank = 0; rank < npus_count; ++rank) {
+          const auto completed = systems[rank]->workload->rank_completion_count;
+          if (completed != observed_rank_completions[rank]) {
+            observed_rank_completions[rank] = completed;
+            ++state_gen;
+            clear_suppression();
+          }
+        }
       }
 
       for (std::size_t idx = 0; idx < end_npu_ids.size(); ++idx) {

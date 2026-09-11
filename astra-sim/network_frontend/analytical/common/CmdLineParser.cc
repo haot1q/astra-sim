@@ -43,6 +43,8 @@ void CmdLineParser::define_options() noexcept {
         cxxopts::value<double>()->default_value("1"))(
         "rendezvous-protocol", "Whether to enable rendezvous protocol",
         cxxopts::value<bool>()->default_value("false"))(
+        "rank-completion-notifications", "Report actual per-rank graph completion",
+        cxxopts::value<bool>()->default_value("false"))(
         "start-npu-ids",
         "Start NPU id list (comma-separated)",
         cxxopts::value<std::vector<int>>()->default_value("-1"))(

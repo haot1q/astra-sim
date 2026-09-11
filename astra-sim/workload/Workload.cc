@@ -591,7 +591,12 @@ void Workload::call(EventType event, CallData* data) {
         (hw_resource->num_in_flight_cpu_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comp_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comm_ops == 0) ) {
-        // report();
+        if (emit_rank_completions) {
+            LoggerFactory::get_logger("workload")->info(
+                "RANK_ITERATION_COMPLETE_V1 rank={} iteration={} finish_ns={}",
+                sys->id, iteration, Sys::boostedTick());
+            ++rank_completion_count;
+        }
         if (!pending_workloads.empty()) {
             string next_workload = pending_workloads.front();
             pending_workloads.pop();

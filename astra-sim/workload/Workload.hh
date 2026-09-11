@@ -62,6 +62,9 @@ class Workload : public Callable {
 
     // stats
     void report();
+    // Opt-in completion evidence is independent of frontend stdin handshakes.
+    bool emit_rank_completions = false;
+    uint64_t rank_completion_count = 0;
 
     Chakra::ETFeeder* et_feeder;
     CommunicatorGroup* comm_group;
