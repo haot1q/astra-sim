@@ -77,6 +77,12 @@ if(BUILD_TESTING)
     target_link_libraries(AstraSim_TemplateWorkloadFeeder_Test PRIVATE AstraSim)
     add_test(NAME AstraSim_TemplateWorkloadFeeder_Test
             COMMAND AstraSim_TemplateWorkloadFeeder_Test)
+
+    add_executable(AstraSim_IndexedTemplateWorkloadFeeder_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/IndexedTemplateWorkloadFeederTest.cc)
+    target_link_libraries(AstraSim_IndexedTemplateWorkloadFeeder_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_IndexedTemplateWorkloadFeeder_Test
+            COMMAND AstraSim_IndexedTemplateWorkloadFeeder_Test)
 endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
