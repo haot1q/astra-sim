@@ -641,6 +641,234 @@ bool mechanism_metrics_line_is_a_stable_ordered_protocol() {
            line.find('\n') == std::string::npos;
 }
 
+Json rank_invocation(const Json& definition,
+                     const std::string& root,
+                     Json bindings) {
+    return {{"schema_version", "template-invocation-v2"},
+            {"definition_id", definition.at("template_id")},
+            {"definition_digest", definition.at("definition_digest")},
+            {"ranks",
+             {{{"rank", 0U},
+               {"root_template", root},
+               {"bindings", std::move(bindings)}}}}};
+}
+
+std::vector<uint64_t> drain_tensor_sizes(AstraSim::WorkloadFeeder& feeder) {
+    std::vector<uint64_t> sizes;
+    while (feeder.hasNodesToIssue()) {
+        auto node = feeder.getNextIssuableNode();
+        if (node == nullptr) return {};
+        sizes.push_back(node->tensor_size());
+        feeder.freeChildrenNodes(node->id());
+        feeder.removeNode(node->id());
+    }
+    return sizes;
+}
+
+// H growth rebinds bytes on the same compiled skeleton. The leaf DAG length
+// stays one; only tensor_size changes. A second load of the same file must not
+// compile another plan.
+bool kv_growth_rebinds_bytes_without_recompiling_the_plan() {
+    TemplateRegistry registry;
+    const Json step = {
+        {"id", "step"},
+        {"ports",
+         {{{"name", "history_bytes"}, {"type", "uint64"}},
+          {{"name", "step_delay"}, {"type", "uint64"}}}},
+        {"nodes",
+         {{{"id", "work"},
+           {"kind", "compute"},
+           {"deps", Json::array()},
+           {"attrs",
+            {{"duration_ns", "$step_delay"},
+             {"num_ops", 0U},
+             {"tensor_size", "$history_bytes"},
+             {"is_cpu_op", false}}}}}}};
+    const auto definition_json = definition_with_templates({step});
+    const auto definition_path =
+        write_json("astra-template-v2-kv-growth-definition.json",
+                   definition_json);
+    const auto first_path = write_json(
+        "astra-template-v2-kv-growth-invocation-0.json",
+        rank_invocation(definition_json, "step",
+                        {{"history_bytes", 8U}, {"step_delay", 4U}}));
+    const auto second_path = write_json(
+        "astra-template-v2-kv-growth-invocation-1.json",
+        rank_invocation(definition_json, "step",
+                        {{"history_bytes", 32U}, {"step_delay", 4U}}));
+    const auto definition = registry.loadDefinition(definition_path);
+    const auto first_plans = registry.planCompilationCount();
+    std::vector<uint64_t> first_sizes;
+    std::vector<uint64_t> first_runtimes;
+    {
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(first_path, 0, *definition),
+            &registry);
+        auto node = feeder.getNextIssuableNode();
+        first_sizes.push_back(node->tensor_size());
+        first_runtimes.push_back(node->runtime());
+        feeder.freeChildrenNodes(node->id());
+        feeder.removeNode(node->id());
+        if (feeder.hasNodesToIssue()) return false;
+    }
+    registry.loadDefinition(definition_path);
+    std::vector<uint64_t> second_sizes;
+    {
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(second_path, 0, *definition),
+            &registry);
+        second_sizes = drain_tensor_sizes(feeder);
+    }
+    std::remove(definition_path.c_str());
+    std::remove(first_path.c_str());
+    std::remove(second_path.c_str());
+    return first_plans == 1 && registry.planCompilationCount() == 1 &&
+           registry.definitionLoadCount() == 1 &&
+           first_sizes == std::vector<uint64_t>({8}) &&
+           first_runtimes == std::vector<uint64_t>({4}) &&
+           second_sizes == std::vector<uint64_t>({32}) &&
+           registry.activeFrameCount() == 0;
+}
+
+// A window/tile variant is a different template, not a mutated cache entry.
+// Invoking the compact root must not emit the extra window leaf.
+bool structure_variant_is_a_separate_compiled_template() {
+    TemplateRegistry registry;
+    Json compact_attrs = compute_attrs(1U);
+    Json window_attrs = compute_attrs(1U);
+    const Json compact = {
+        {"id", "compact"},
+        {"ports", Json::array()},
+        {"nodes",
+         {{{"id", "work"},
+           {"kind", "compute"},
+           {"deps", Json::array()},
+           {"attrs", compact_attrs}}}}};
+    const Json windowed = {
+        {"id", "windowed"},
+        {"ports", Json::array()},
+        {"nodes",
+         {{{"id", "prefix"},
+           {"kind", "compute"},
+           {"deps", Json::array()},
+           {"attrs", window_attrs}},
+          {{"id", "extra_tile"},
+           {"kind", "compute"},
+           {"deps", {"prefix"}},
+           {"attrs", window_attrs}}}}};
+    const auto definition_json =
+        definition_with_templates({compact, windowed});
+    const auto definition_path =
+        write_json("astra-template-v2-variant-definition.json", definition_json);
+    const auto compact_path = write_json(
+        "astra-template-v2-variant-compact.json",
+        rank_invocation(definition_json, "compact", Json::object()));
+    const auto window_path = write_json(
+        "astra-template-v2-variant-window.json",
+        rank_invocation(definition_json, "windowed", Json::object()));
+    const auto definition = registry.loadDefinition(definition_path);
+    TemplateWorkloadFeeder compact_feeder(
+        definition, registry.loadInvocation(compact_path, 0, *definition),
+        &registry);
+    const auto compact_work = drain(compact_feeder);
+    TemplateWorkloadFeeder window_feeder(
+        definition, registry.loadInvocation(window_path, 0, *definition),
+        &registry);
+    const auto window_work = drain(window_feeder);
+    TemplateWorkloadFeeder compact_again(
+        definition, registry.loadInvocation(compact_path, 0, *definition),
+        &registry);
+    const auto compact_again_work = drain(compact_again);
+    std::remove(definition_path.c_str());
+    std::remove(compact_path.c_str());
+    std::remove(window_path.c_str());
+    return registry.planCompilationCount() == 2 &&
+           compact_work.size() == 1 && window_work.size() == 2 &&
+           compact_work == compact_again_work &&
+           registry.definitionLoadCount() == 1 &&
+           registry.activeFrameCount() == 0;
+}
+
+// A memory leaf that unblocks compute is not an isolated preparation node.
+// Isolated memory (no dependents) keeps an empty child list. This is the
+// MemoryMovementExecutor getChildren() predicate; the executor itself is not
+// constructed here.
+bool memory_leaf_with_compute_dependent_is_not_isolated_preparation() {
+    TemplateRegistry registry;
+    const Json migrate = {
+        {"id", "migrate"},
+        {"ports", Json::array()},
+        {"nodes",
+         {{{"id", "load"},
+           {"kind", "memory_load"},
+           {"deps", Json::array()},
+           {"attrs",
+            {{"tensor_size", 4096U},
+             {"tensor_loc", 17U},
+             {"tensor_device", 2U},
+             {"tensor_channel", 0U}}}},
+          {{"id", "work"},
+           {"kind", "compute"},
+           {"deps", {"load"}},
+           {"attrs", compute_attrs(2U)}}}}};
+    const Json isolated = {
+        {"id", "isolated"},
+        {"ports", Json::array()},
+        {"nodes",
+         {{{"id", "load"},
+           {"kind", "memory_load"},
+           {"deps", Json::array()},
+           {"attrs",
+            {{"tensor_size", 4096U},
+             {"tensor_loc", 17U},
+             {"tensor_device", 2U},
+             {"tensor_channel", 0U}}}}}}};
+    const auto definition_json =
+        definition_with_templates({migrate, isolated});
+    const auto definition_path =
+        write_json("astra-template-v2-migrate-definition.json", definition_json);
+    const auto migrate_path = write_json(
+        "astra-template-v2-migrate-invocation.json",
+        rank_invocation(definition_json, "migrate", Json::object()));
+    const auto isolated_path = write_json(
+        "astra-template-v2-isolated-invocation.json",
+        rank_invocation(definition_json, "isolated", Json::object()));
+    const auto definition = registry.loadDefinition(definition_path);
+    bool dependent_not_isolated = false;
+    {
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(migrate_path, 0, *definition),
+            &registry);
+        auto load = feeder.getNextIssuableNode();
+        const auto children = feeder.childNodes(load->id());
+        dependent_not_isolated =
+            load != nullptr && load->type() == ChakraProtoMsg::MEM_LOAD_NODE &&
+            !load->getChildren().empty() &&
+            load->getChildren().front()->type() == ChakraProtoMsg::COMP_NODE &&
+            children.size() == 1;
+        feeder.freeChildrenNodes(load->id());
+        feeder.removeNode(load->id());
+        drain(feeder);
+    }
+    bool isolated_memory = false;
+    {
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(isolated_path, 0, *definition),
+            &registry);
+        auto load = feeder.getNextIssuableNode();
+        isolated_memory = load != nullptr && load->getChildren().empty() &&
+                          feeder.childNodes(load->id()).empty();
+        feeder.freeChildrenNodes(load->id());
+        feeder.removeNode(load->id());
+    }
+    std::remove(definition_path.c_str());
+    std::remove(migrate_path.c_str());
+    std::remove(isolated_path.c_str());
+    return dependent_not_isolated && isolated_memory &&
+           registry.activeFrameCount() == 0 &&
+           registry.materializedLeafCount() == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -651,6 +879,9 @@ int main() {
                    abandoning_an_in_flight_invocation_releases_all_registry_state() &&
                    recorded_compute_allows_zero_tensor_size() &&
                    native_memory_tier_ids_are_not_limited_to_legacy_slots() &&
+                   kv_growth_rebinds_bytes_without_recompiling_the_plan() &&
+                   structure_variant_is_a_separate_compiled_template() &&
+                   memory_leaf_with_compute_dependent_is_not_isolated_preparation() &&
                    template_invocation_matches_the_reference_et_of_the_same_dag() &&
                    mechanism_metrics_line_is_a_stable_ordered_protocol()
                ? 0
