@@ -654,21 +654,26 @@ Json rank_invocation(const Json& definition,
                {"bindings", std::move(bindings)}}}}};
 }
 
-std::vector<uint64_t> drain_tensor_sizes(AstraSim::WorkloadFeeder& feeder) {
-    std::vector<uint64_t> sizes;
+struct BoundWork {
+    std::vector<uint64_t> tensor_sizes;
+    std::vector<uint64_t> num_ops;
+};
+
+BoundWork drain_bound_work(AstraSim::WorkloadFeeder& feeder) {
+    BoundWork work;
     while (feeder.hasNodesToIssue()) {
         auto node = feeder.getNextIssuableNode();
         if (node == nullptr) return {};
-        sizes.push_back(node->tensor_size());
+        work.tensor_sizes.push_back(node->tensor_size());
+        work.num_ops.push_back(node->num_ops());
         feeder.freeChildrenNodes(node->id());
         feeder.removeNode(node->id());
     }
-    return sizes;
+    return work;
 }
 
-// H growth rebinds bytes on the same compiled skeleton. The leaf DAG length
-// stays one; only tensor_size changes. A second load of the same file must not
-// compile another plan.
+// H/B growth rebinds work on the same compiled skeleton. The leaf DAG length
+// stays one; only tensor_size and num_ops change.
 bool h65k_b4_rebinds_without_recompiling_the_plan() {
     TemplateRegistry registry;
     const Json step = {
@@ -683,21 +688,21 @@ bool h65k_b4_rebinds_without_recompiling_the_plan() {
            {"deps", Json::array()},
            {"attrs",
             {{"duration_ns", "$step_delay"},
-             {"num_ops", 0U},
+             {"num_ops", "$batch_size"},
              {"tensor_size", "$history_bytes"},
              {"is_cpu_op", false}}}}}}};
     const auto definition_json = definition_with_templates({step});
     const auto definition_path =
-        write_json("astra-template-v2-kv-growth-definition.json",
+        write_json("astra-template-v2-h65k-b4-definition.json",
                    definition_json);
     const auto first_path = write_json(
-        "astra-template-v2-kv-growth-invocation-0.json",
+        "astra-template-v2-h65k-b4-invocation-0.json",
         rank_invocation(definition_json, "step",
                         {{"history_bytes", 4096U},
                          {"batch_size", 2U},
                          {"step_delay", 4U}}));
     const auto second_path = write_json(
-        "astra-template-v2-kv-growth-invocation-1.json",
+        "astra-template-v2-h65k-b4-invocation-1.json",
         rank_invocation(definition_json, "step",
                         {{"history_bytes", 65663U},
                          {"batch_size", 4U},
@@ -705,6 +710,7 @@ bool h65k_b4_rebinds_without_recompiling_the_plan() {
     const auto definition = registry.loadDefinition(definition_path);
     const auto first_plans = registry.planCompilationCount();
     std::vector<uint64_t> first_sizes;
+    std::vector<uint64_t> first_ops;
     std::vector<uint64_t> first_runtimes;
     {
         TemplateWorkloadFeeder feeder(
@@ -712,28 +718,34 @@ bool h65k_b4_rebinds_without_recompiling_the_plan() {
             &registry);
         auto node = feeder.getNextIssuableNode();
         first_sizes.push_back(node->tensor_size());
+        first_ops.push_back(node->num_ops());
         first_runtimes.push_back(node->runtime());
         feeder.freeChildrenNodes(node->id());
         feeder.removeNode(node->id());
         if (feeder.hasNodesToIssue()) return false;
     }
     registry.loadDefinition(definition_path);
-    std::vector<uint64_t> second_sizes;
+    BoundWork second;
     {
         TemplateWorkloadFeeder feeder(
             definition, registry.loadInvocation(second_path, 0, *definition),
             &registry);
-        second_sizes = drain_tensor_sizes(feeder);
+        second = drain_bound_work(feeder);
     }
     std::remove(definition_path.c_str());
     std::remove(first_path.c_str());
     std::remove(second_path.c_str());
+    if (first_ops != std::vector<uint64_t>({2}) ||
+        second.num_ops != std::vector<uint64_t>({4})) {
+        throw std::runtime_error(
+            "H65k/B4 binding did not update executed num_ops");
+    }
     return first_plans == 1 && registry.planCompilationCount() == 1 &&
            registry.definitionLoadCount() == 1 &&
            registry.invocationCount() == 2 &&
            first_sizes == std::vector<uint64_t>({4096}) &&
            first_runtimes == std::vector<uint64_t>({4}) &&
-           second_sizes == std::vector<uint64_t>({65663}) &&
+           second.tensor_sizes == std::vector<uint64_t>({65663}) &&
            registry.activeFrameCount() == 0;
 }
 

@@ -4,6 +4,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 
 #include "MemoryPreparationWire.hh"
 
+#include <cstddef>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -16,6 +17,7 @@ namespace {
 
 namespace Wire = ServiceBindingJson;
 using Json = nlohmann::json;
+constexpr std::size_t kMaxPreparationRecordBytes = 64 * 1024;
 
 std::string text(const Json& value) {
     if (!value.is_string() || value.get<std::string>().empty()) {
@@ -132,9 +134,10 @@ MovementInput validate_input(
         Wire::uint32(destination.at("device_id")),
         uint64(event.at("bytes"), "movement bytes"),
         strings(event.at("depends_on"), "movement dependencies")};
-    if (input.source_tier == 0 || input.bytes == 0) {
+    if (input.source_tier == 0 || input.destination_tier == 0 ||
+        input.bytes == 0) {
         throw std::invalid_argument(
-            "direct preparation requires a nonzero source tier and bytes");
+            "direct preparation requires nonzero endpoint tiers and bytes");
     }
     return input;
 }
@@ -290,6 +293,11 @@ std::shared_ptr<Chakra::ETFeederNode> direct_movement_node(
         input.dependencies);
     add_identity_attributes(*node, sidecar, event);
     add_path_attributes(*node, path, path_attributes);
+    if (node->ByteSizeLong() == 0 ||
+        node->ByteSizeLong() > kMaxPreparationRecordBytes) {
+        throw std::invalid_argument(
+            "direct preparation node exceeds protocol size bound");
+    }
     return std::make_shared<Chakra::ETFeederNode>(node);
 }
 

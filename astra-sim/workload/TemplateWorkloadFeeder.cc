@@ -100,6 +100,15 @@ int64_t positive_int64(const Json& value, const std::string& field) {
     return static_cast<int64_t>(parsed);
 }
 
+int64_t nonnegative_int64(const Json& value, const std::string& field) {
+    if (!value.is_number_unsigned() ||
+        value.get<uint64_t>() > static_cast<uint64_t>(INT64_MAX)) {
+        throw std::invalid_argument(
+            "template-v2: " + field + " must fit Chakra int64");
+    }
+    return static_cast<int64_t>(value.get<uint64_t>());
+}
+
 }  // namespace
 
 TemplateWorkloadFeeder::TemplateWorkloadFeeder(
@@ -247,7 +256,7 @@ std::shared_ptr<Chakra::ETFeederNode> TemplateWorkloadFeeder::makeLeaf(
                 "template-v2: compute requires duration_ns or num_ops");
         }
         node->set_duration_micros(duration.get<uint64_t>());
-        add_uint64(*node, "num_ops", num_ops.get<uint64_t>());
+        add_int64(*node, "num_ops", nonnegative_int64(num_ops, "num_ops"));
         const auto tensor_size = attr("tensor_size");
         if (!tensor_size.is_number_unsigned()) {
             throw std::invalid_argument("template-v2: tensor_size must be uint64");

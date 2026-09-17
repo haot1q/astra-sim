@@ -4,6 +4,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 
 #include "PdLocalPreparationExecutor.hh"
 
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
 
@@ -44,6 +45,42 @@ Json identity(const Json& work) {
     return result;
 }
 
+struct PreparationSchema {
+    bool direct;
+    bool staged;
+    const char* rank_field;
+};
+
+PreparationSchema validate_schema(const Json& work) {
+    const bool direct =
+        work.at("schema_version") == "pd-local-preparation-v3";
+    const bool staged = direct
+        ? work.contains("pipeline_stage") || work.contains("endpoint")
+        : work.at("schema_version") == "pd-local-preparation-v2";
+    if (direct &&
+        work.contains("pipeline_stage") != work.contains("endpoint")) {
+        throw std::invalid_argument(
+            "direct preparation requires stage and endpoint together");
+    }
+    auto envelope = work;
+    if (staged) {
+        envelope.erase("pipeline_stage");
+        envelope.erase("endpoint");
+    }
+    const char* rank_field = direct ? "rank_events" : "rank_traces";
+    Wire::fields(
+        envelope,
+        {"schema_version", "run_id", "attempt_id", "transfer_id",
+         "preparation_id", "instance_id", "manifest_digest",
+         "service_binding_digest", "service_activation_id",
+         "backend_instance_id", rank_field});
+    if (!direct && !staged &&
+        work.at("schema_version") != "pd-local-preparation-v1") {
+        throw std::invalid_argument("unsupported preparation work schema");
+    }
+    return {direct, staged, rank_field};
+}
+
 void validate_node(const std::shared_ptr<Chakra::ETFeederNode>& node,
                    const Json& owner, const std::set<std::string>& rank_events) {
     for (const auto& pair : std::vector<std::pair<std::string, std::string>>{
@@ -67,6 +104,94 @@ void validate_node(const std::shared_ptr<Chakra::ETFeederNode>& node,
         }
     }
 }
+
+struct RankWork {
+    uint32_t rank;
+    std::map<std::string, std::string> logical_by_physical;
+    std::set<std::string> logical_ids;
+    std::set<std::string> physical_ids;
+};
+
+RankWork parse_rank_work(const Json& item, bool direct) {
+    Wire::fields(
+        item,
+        direct
+            ? std::initializer_list<const char*>{
+                  "rank", "event_path", "event_digest", "events"}
+            : std::initializer_list<const char*>{
+                  "rank", "trace_path", "events"});
+    RankWork result{Wire::uint32(item.at("rank")), {}, {}, {}};
+    for (const auto& event : Wire::array(item.at("events"))) {
+        Wire::fields(event, {"logical_event_id", "physical_event_id"});
+        const auto physical = text(event.at("physical_event_id"));
+        const auto logical = text(event.at("logical_event_id"));
+        if (!result.physical_ids.insert(physical).second ||
+            !result.logical_ids.insert(logical).second) {
+            throw std::invalid_argument(
+                "duplicate preparation event mapping");
+        }
+        result.logical_by_physical.emplace(physical, logical);
+    }
+    return result;
+}
+
+Json read_direct_sidecar(
+    const std::string& descriptor_path, const Json& item) {
+    const auto descriptor =
+        std::filesystem::weakly_canonical(descriptor_path);
+    const auto sidecar_path =
+        std::filesystem::weakly_canonical(text(item.at("event_path")));
+    if (sidecar_path.parent_path() != descriptor.parent_path()) {
+        throw std::invalid_argument(
+            "direct preparation event path escapes its descriptor directory");
+    }
+    const auto sidecar = Wire::read(sidecar_path.string());
+    if (Wire::digest(sidecar) != text(item.at("event_digest"))) {
+        throw std::invalid_argument(
+            "direct preparation event digest mismatch");
+    }
+    return sidecar;
+}
+
+std::vector<std::shared_ptr<Chakra::ETFeederNode>> read_nodes(
+    const std::string& descriptor_path,
+    const Json& item,
+    const Json& owner,
+    const RankWork& rank_work,
+    const PipelinePreparationIdentity& stage,
+    bool direct) {
+    if (direct) {
+        const auto sidecar = read_direct_sidecar(descriptor_path, item);
+        if (text(sidecar.at("run_id")) != owner.at("run_id") ||
+            text(sidecar.at("instance_id")) != owner.at("instance_id") ||
+            text(sidecar.at("manifest_digest")) !=
+                owner.at("manifest_digest")) {
+            throw std::invalid_argument(
+                "direct preparation event/envelope identity mismatch");
+        }
+        std::vector<std::shared_ptr<Chakra::ETFeederNode>> nodes;
+        for (const auto& event : Wire::array(sidecar.at("events"))) {
+            nodes.push_back(direct_movement_node(
+                sidecar, event, rank_work.rank, nodes.size() + 1));
+        }
+        if (nodes.size() != rank_work.physical_ids.size()) {
+            throw std::invalid_argument(
+                "direct preparation event set cardinality differs");
+        }
+        return nodes;
+    }
+    const auto trace = read_memory_preparation_trace(
+        text(item.at("trace_path")), rank_work.physical_ids.size());
+    if (trace.pipeline_stage_digest != stage.digest ||
+        trace.rank != rank_work.rank ||
+        trace.manifest_digest != owner.at("manifest_digest") ||
+        trace.binding_digest != owner.at("service_binding_digest") ||
+        trace.activation_id != owner.at("service_activation_id")) {
+        throw std::invalid_argument(
+            "preparation ET/envelope metadata mismatch");
+    }
+    return trace.nodes;
+}
 }  // namespace
 
 PdLocalPreparationExecutor::PdLocalPreparationExecutor(const std::vector<Sys*>& systems,
@@ -87,50 +212,21 @@ PdLocalPreparationExecutor::PdLocalPreparationExecutor(const std::vector<Sys*>& 
 std::vector<PdLocalPreparationExecutor::Submission>
 PdLocalPreparationExecutor::read_work(const std::string& path) const {
     const auto work = Wire::read(path);
-    const bool direct =
-        work.at("schema_version") == "pd-local-preparation-v3";
-    const bool staged = direct
-        ? work.contains("pipeline_stage") || work.contains("endpoint")
-        : work.at("schema_version") == "pd-local-preparation-v2";
-    if (direct &&
-        work.contains("pipeline_stage") != work.contains("endpoint")) {
-        throw std::invalid_argument(
-            "direct preparation requires stage and endpoint together");
-    }
-    auto envelope = work;
-    if (staged) {
-        envelope.erase("pipeline_stage");
-        envelope.erase("endpoint");
-    }
-    Wire::fields(
-        envelope,
-        {"schema_version", "run_id", "attempt_id", "transfer_id",
-         "preparation_id", "instance_id", "manifest_digest",
-         "service_binding_digest", "service_activation_id",
-         "backend_instance_id",
-         direct ? "rank_events" : "rank_traces"});
-    if (!direct && !staged &&
-        work.at("schema_version") != "pd-local-preparation-v1") {
-        throw std::invalid_argument("unsupported preparation work schema");
-    }
+    const auto schema = validate_schema(work);
     const auto owner = identity(work);
     const auto instance = Wire::uint32(work.at("backend_instance_id"));
     if (!services_) throw std::invalid_argument("preparation requires actual physical services");
-    const auto stage = staged ? validate_pipeline_preparation_identity(work, *services_)
-                              : PipelinePreparationIdentity{};
+    const auto stage = schema.staged
+        ? validate_pipeline_preparation_identity(work, *services_)
+        : PipelinePreparationIdentity{};
     std::vector<Submission> submissions;
     std::set<uint32_t> ranks;
     std::set<std::string> physical_ids;
     std::set<std::string> expected_logical;
-    const auto& rank_work =
-        work.at(direct ? "rank_events" : "rank_traces");
+    const auto& rank_work = work.at(schema.rank_field);
     for (const auto& item : Wire::array(rank_work)) {
-        if (direct) {
-            Wire::fields(item, {"rank", "event_path", "events"});
-        } else {
-            Wire::fields(item, {"rank", "trace_path", "events"});
-        }
-        const auto rank = Wire::uint32(item.at("rank"));
+        const auto parsed = parse_rank_work(item, schema.direct);
+        const auto rank = parsed.rank;
         if (rank >= systems_.size() || (!ranks.empty() && rank <= *ranks.rbegin())) {
             throw std::invalid_argument("preparation ranks must be actual, sorted, and unique");
         }
@@ -140,21 +236,13 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
             actual->second.at("instance_id") != instance) {
             throw std::invalid_argument("preparation rank belongs to a different actual instance");
         }
-        std::map<std::string, std::string> logical_by_physical;
-        std::set<std::string> logical_ids;
-        std::set<std::string> rank_events;
-        for (const auto& event : Wire::array(item.at("events"))) {
-            Wire::fields(event, {"logical_event_id", "physical_event_id"});
-            const auto physical = text(event.at("physical_event_id"));
-            const auto logical = text(event.at("logical_event_id"));
-            if (!physical_ids.insert(physical).second || !logical_ids.insert(logical).second) {
+        for (const auto& physical : parsed.physical_ids) {
+            if (!physical_ids.insert(physical).second) {
                 throw std::invalid_argument("duplicate preparation event mapping");
             }
-            logical_by_physical.emplace(physical, logical);
-            rank_events.insert(physical);
         }
-        if (expected_logical.empty()) expected_logical = logical_ids;
-        if (logical_ids != expected_logical) {
+        if (expected_logical.empty()) expected_logical = parsed.logical_ids;
+        if (parsed.logical_ids != expected_logical) {
             throw std::invalid_argument("preparation rank has an incomplete logical event set");
         }
         auto& system = *systems_.at(rank);
@@ -164,49 +252,26 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
             text(owner.at("service_binding_digest")),
             text(owner.at("service_activation_id")), rank);
         std::set<std::string> observed;
-        std::vector<std::shared_ptr<Chakra::ETFeederNode>> nodes;
-        if (direct) {
-            const auto sidecar = Wire::read(text(item.at("event_path")));
-            if (text(sidecar.at("run_id")) != owner.at("run_id") ||
-                text(sidecar.at("instance_id")) != owner.at("instance_id") ||
-                text(sidecar.at("manifest_digest")) !=
-                    owner.at("manifest_digest")) {
-                throw std::invalid_argument(
-                    "direct preparation event/envelope identity mismatch");
-            }
-            for (const auto& event : Wire::array(sidecar.at("events"))) {
-                nodes.push_back(direct_movement_node(
-                    sidecar, event, rank, nodes.size() + 1));
-            }
-            if (nodes.size() != rank_events.size()) {
-                throw std::invalid_argument(
-                    "direct preparation event set cardinality differs");
-            }
-        } else {
-            const auto trace = read_memory_preparation_trace(
-                text(item.at("trace_path")), rank_events.size());
-            if (trace.pipeline_stage_digest != stage.digest ||
-                trace.rank != rank ||
-                trace.manifest_digest != owner.at("manifest_digest") ||
-                trace.binding_digest != owner.at("service_binding_digest") ||
-                trace.activation_id != owner.at("service_activation_id")) {
-                throw std::invalid_argument(
-                    "preparation ET/envelope metadata mismatch");
-            }
-            nodes = trace.nodes;
-        }
+        const auto nodes =
+            read_nodes(path, item, owner, parsed, stage, schema.direct);
         for (const auto& node : nodes) {
             const auto event_id = attribute(node, "movement_event_id");
-            if (!rank_events.count(event_id) || !observed.insert(event_id).second) {
+            if (!parsed.physical_ids.count(event_id) ||
+                !observed.insert(event_id).second) {
                 throw std::invalid_argument("preparation ET event mapping mismatch");
             }
-            validate_node(node, owner, rank_events);
-            submissions.push_back({rank, logical_by_physical.at(event_id), event_id, owner, node});
+            validate_node(node, owner, parsed.physical_ids);
+            submissions.push_back(
+                {rank, parsed.logical_by_physical.at(event_id),
+                 event_id, owner, node});
         }
-        if (observed != rank_events) throw std::invalid_argument("preparation event set incomplete");
+        if (observed != parsed.physical_ids) {
+            throw std::invalid_argument("preparation event set incomplete");
+        }
     }
     if (submissions.empty()) throw std::invalid_argument("empty preparation work");
-    if (staged && std::vector<uint32_t>(ranks.begin(), ranks.end()) != stage.ranks) {
+    if (schema.staged &&
+        std::vector<uint32_t>(ranks.begin(), ranks.end()) != stage.ranks) {
         throw std::invalid_argument("preparation work does not cover the exact stage TP ranks");
     }
     return submissions;
