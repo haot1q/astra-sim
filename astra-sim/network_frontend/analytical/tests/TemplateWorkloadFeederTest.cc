@@ -402,6 +402,43 @@ bool concurrent_calls_queue_on_shared_and_overlap_on_independent_resources() {
            registry.materializedLeafCount() == 0;
 }
 
+// An invocation abandoned in flight must return every frame and materialized
+// leaf, and must not poison the shared registry for the next invocation.
+bool abandoning_an_in_flight_invocation_releases_all_registry_state() {
+    TemplateRegistry registry;
+    const auto definition_json = valid_definition();
+    const auto definition_path =
+        write_json("astra-template-v2-cancel-definition.json", definition_json);
+    const auto invocation_path = write_json(
+        "astra-template-v2-cancel-invocation.json", invocation(definition_json, 9U));
+    const auto definition = registry.loadDefinition(definition_path);
+    bool cancelled_in_flight = false;
+    {
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(invocation_path, 0, *definition),
+            &registry);
+        auto node = feeder.getNextIssuableNode();
+        feeder.freeChildrenNodes(node->id());
+        cancelled_in_flight = node != nullptr && feeder.hasNodesToIssue() &&
+                              registry.activeFrameCount() != 0 &&
+                              registry.materializedLeafCount() != 0;
+    }
+    const bool released = registry.activeFrameCount() == 0 &&
+                          registry.materializedLeafCount() == 0;
+    TemplateWorkloadFeeder reused(
+        definition, registry.loadInvocation(invocation_path, 0, *definition),
+        &registry);
+    const bool next_invocation_completes =
+        drain(reused) == std::vector<uint64_t>(6, 9U);
+    std::remove(definition_path.c_str());
+    std::remove(invocation_path.c_str());
+    return cancelled_in_flight && released && next_invocation_completes &&
+           registry.definitionLoadCount() == 1 &&
+           registry.invocationCount() == 2 &&
+           registry.activeFrameCount() == 0 &&
+           registry.materializedLeafCount() == 0;
+}
+
 bool recorded_compute_allows_zero_tensor_size() {
     TemplateRegistry registry;
     auto definition_json = valid_definition();
@@ -611,6 +648,7 @@ int main() {
                    rejects_bad_binding_and_call_cycle() &&
                    sibling_compute_nodes_share_the_workload_resource() &&
                    concurrent_calls_queue_on_shared_and_overlap_on_independent_resources() &&
+                   abandoning_an_in_flight_invocation_releases_all_registry_state() &&
                    recorded_compute_allows_zero_tensor_size() &&
                    native_memory_tier_ids_are_not_limited_to_legacy_slots() &&
                    template_invocation_matches_the_reference_et_of_the_same_dag() &&
