@@ -38,6 +38,27 @@ class WorkloadFeeder {
     virtual bool isTemplateV2() const { return false; }
 };
 
+class TemplateIdleWorkloadFeeder final : public WorkloadFeeder {
+  public:
+    bool hasNodesToIssue() override;
+    std::shared_ptr<Chakra::ETFeederNode> getNextIssuableNode() override;
+    void pushBackIssuableNode(uint64_t node_id) override;
+    std::shared_ptr<Chakra::ETFeederNode> lookupNode(
+        uint64_t node_id) override;
+    std::vector<std::shared_ptr<Chakra::ETFeederNode>> childNodes(
+        uint64_t node_id) override;
+    void freeChildrenNodes(uint64_t node_id) override;
+    void removeNode(uint64_t node_id) override;
+    void printGraph() override;
+    const std::string& tierManifestDigest() const override;
+    const std::string& serviceBindingDigest() const override;
+    const std::string& serviceActivationId() const override;
+    std::optional<uint32_t> serviceRank() const override;
+
+  private:
+    const std::string empty_;
+};
+
 class ChakraEtWorkloadFeeder final : public WorkloadFeeder {
   public:
     explicit ChakraEtWorkloadFeeder(const std::string& filename);

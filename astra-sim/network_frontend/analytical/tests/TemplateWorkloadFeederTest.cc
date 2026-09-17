@@ -23,6 +23,7 @@ namespace {
 using Json = nlohmann::json;
 using AstraSim::ChakraEtWorkloadFeeder;
 using AstraSim::ServiceBindingJson::digest;
+using AstraSim::TemplateIdleWorkloadFeeder;
 using AstraSim::TemplateRegistry;
 using AstraSim::TemplateWorkloadFeeder;
 
@@ -869,6 +870,29 @@ bool memory_leaf_with_compute_dependent_is_not_isolated_preparation() {
            registry.materializedLeafCount() == 0;
 }
 
+bool template_idle_feeder_is_empty_and_fail_closed() {
+    TemplateIdleWorkloadFeeder feeder;
+    if (feeder.hasNodesToIssue() ||
+        feeder.getNextIssuableNode() != nullptr ||
+        !feeder.tierManifestDigest().empty() ||
+        !feeder.serviceBindingDigest().empty() ||
+        !feeder.serviceActivationId().empty() ||
+        feeder.serviceRank().has_value()) {
+        return false;
+    }
+    feeder.printGraph();
+    try {
+        feeder.lookupNode(1);
+    } catch (const std::logic_error&) {
+        try {
+            feeder.removeNode(1);
+        } catch (const std::logic_error&) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 int main() {
@@ -882,6 +906,7 @@ int main() {
                    kv_growth_rebinds_bytes_without_recompiling_the_plan() &&
                    structure_variant_is_a_separate_compiled_template() &&
                    memory_leaf_with_compute_dependent_is_not_isolated_preparation() &&
+                   template_idle_feeder_is_empty_and_fail_closed() &&
                    template_invocation_matches_the_reference_et_of_the_same_dag() &&
                    mechanism_metrics_line_is_a_stable_ordered_protocol()
                ? 0

@@ -46,25 +46,31 @@ MemoryOperation AstraSim::memory_operation_for_node_type(
 }
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
-    string workload_filename = et_filename + "." + to_string(sys->id) + ".et";
-    // Check if workload filename exists
-    if (access(workload_filename.c_str(), R_OK) < 0) {
-        string error_msg;
-        if (errno == ENOENT) {
-            error_msg =
-                "workload file: " + workload_filename + " does not exist";
-        } else if (errno == EACCES) {
-            error_msg = "workload file: " + workload_filename +
-                        " exists but is not readable";
-        } else {
-            error_msg =
-                "Unknown workload file: " + workload_filename + " access error";
-        }
-        LoggerFactory::get_logger("workload")->critical(error_msg);
-        exit(EXIT_FAILURE);
-    }
     this->sys = sys;
-    this->et_feeder = load_et_feeder(workload_filename);
+    if (et_filename == "template-v2-idle") {
+        this->et_feeder = new TemplateIdleWorkloadFeeder();
+    } else {
+        string workload_filename =
+            et_filename + "." + to_string(sys->id) + ".et";
+        // Check if workload filename exists
+        if (access(workload_filename.c_str(), R_OK) < 0) {
+            string error_msg;
+            if (errno == ENOENT) {
+                error_msg =
+                    "workload file: " + workload_filename + " does not exist";
+            } else if (errno == EACCES) {
+                error_msg = "workload file: " + workload_filename +
+                            " exists but is not readable";
+            } else {
+                error_msg =
+                    "Unknown workload file: " + workload_filename +
+                    " access error";
+            }
+            LoggerFactory::get_logger("workload")->critical(error_msg);
+            exit(EXIT_FAILURE);
+        }
+        this->et_feeder = load_et_feeder(workload_filename);
+    }
     this->comm_group = nullptr;
     this->hw_resource = new HardwareResource(1);
     initialize_comm_group(comm_group_filename);
