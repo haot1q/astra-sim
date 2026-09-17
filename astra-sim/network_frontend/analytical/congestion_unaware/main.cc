@@ -387,6 +387,9 @@ int main(int argc, char* argv[]) {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
           }
+          else if (new_filename.rfind("template-v2", 0) == 0) {
+            systems[npu_id]->workload->add_workload(new_filename, {});
+          }
           else if (!preparation_executor.submit_command(new_filename) &&
                    !submit_pd_kv(new_filename)) {
             // Add new workload to this system
@@ -470,6 +473,10 @@ int main(int argc, char* argv[]) {
           else if (new_filename == "done") {
             // This instance is done. Go to sleep until exit
             systems[npu_id]->workload->is_sleep = true;
+          }
+          else if (new_filename.rfind("template-v2", 0) == 0) {
+            systems[npu_id]->workload
+                ->add_workload(new_filename, managed_systems[idx]);
           }
           else if (!preparation_executor.submit_command(new_filename) &&
                    !submit_pd_kv(new_filename)) {

@@ -14,10 +14,13 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include "astra-sim/system/memory/UcieTransport.hh"
+#include "astra-sim/workload/TemplateWorkloadFeeder.hh"
 #include <json/json.hpp>
 
 #include <algorithm>
 #include <iostream>
+#include <set>
+#include <sstream>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -71,16 +74,73 @@ Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     this->is_sleep = false;
 }
 
-ETFeeder* Workload::load_et_feeder(const string& workload_filename) {
-    auto* feeder = new ETFeeder(workload_filename);
+WorkloadFeeder* Workload::load_et_feeder(const string& workload_filename) {
+    auto* feeder = new ChakraEtWorkloadFeeder(workload_filename);
     try {
-        sys->validate_tier_manifest_digest(feeder->tierManifestDigest());
-        sys->validate_service_metadata(*feeder);
+        validate_feeder(*feeder);
+        ++et_read_count_;
     } catch (...) {
         delete feeder;
         throw;
     }
     return feeder;
+}
+
+void Workload::validate_feeder(const WorkloadFeeder& feeder) const {
+    sys->validate_tier_manifest_digest(feeder.tierManifestDigest());
+    sys->validate_service_metadata(
+        feeder.serviceBindingDigest(), feeder.serviceActivationId(),
+        feeder.serviceRank());
+}
+
+unique_ptr<WorkloadFeeder> Workload::prepare_template_feeder(
+    const string& command) {
+    istringstream input(command);
+    string keyword;
+    string definition_path;
+    string invocation_path;
+    string extra;
+    if (!(input >> keyword >> definition_path >> invocation_path) ||
+        keyword != "template-v2" || (input >> extra)) {
+        throw invalid_argument(
+            "template-v2 command must be exactly: template-v2 "
+            "<definition-json-path> <invocation-json-path>");
+    }
+    if (access(definition_path.c_str(), R_OK) < 0 ||
+        access(invocation_path.c_str(), R_OK) < 0) {
+        throw invalid_argument("template-v2 definition/invocation path is not readable");
+    }
+    auto definitions = template_registry_.loadDefinition(definition_path);
+    auto invocation = template_registry_.loadInvocation(
+        invocation_path, static_cast<uint32_t>(sys->id), *definitions);
+    auto feeder = make_unique<TemplateWorkloadFeeder>(
+        std::move(definitions), std::move(invocation), &template_registry_,
+        sys->roofline_enabled);
+    validate_feeder(*feeder);
+    return feeder;
+}
+
+void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder) {
+    if (feeder == nullptr) {
+        throw invalid_argument("cannot install a null workload feeder");
+    }
+    reset_iteration_tracking();
+    delete et_feeder;
+    et_feeder = feeder.release();
+    ++iteration;
+    is_finished = false;
+    fire();
+}
+
+void Workload::report_template_metrics() const {
+    const string line = format_template_metrics_line(
+        static_cast<uint32_t>(sys->id), template_registry_, et_read_count_);
+    // The frontend contract is the stdout protocol line. It is written through
+    // the shared atomic writer so a rank's metrics are published synchronously
+    // and cannot be lost in the asynchronous logger's queue. Do not duplicate
+    // this line through a logger with a console sink: the controller requires
+    // exactly one metric record per rank and invocation.
+    emit_memory_protocol_line(line);
 }
 
 Workload::~Workload() {
@@ -253,10 +313,9 @@ optional<uint64_t> Workload::movement_exposed_to_dependent_ns(
     uint64_t node_id,
     uint64_t ready_ns,
     uint64_t finish_ns) {
-    const auto movement = et_feeder->lookupNode(node_id);
     bool has_compute_consumer = false;
     uint64_t maximum_exposure_ns = 0;
-    for (const auto& child : movement->getChildren()) {
+    for (const auto& child : et_feeder->childNodes(node_id)) {
         if (child->type() != ChakraNodeType::COMP_NODE || child->is_cpu_op()) {
             continue;
         }
@@ -279,7 +338,7 @@ optional<uint64_t> Workload::movement_exposed_to_dependent_ns(
 void Workload::record_parent_completion(
     const shared_ptr<Chakra::ETFeederNode>& node) {
     const uint64_t completion_ns = static_cast<uint64_t>(Sys::boostedTick());
-    for (const auto& child : node->getChildren()) {
+    for (const auto& child : et_feeder->childNodes(node->id())) {
         auto& latest = latest_parent_completion_ns_[child->id()];
         latest = max(latest, completion_ns);
     }
@@ -597,14 +656,20 @@ void Workload::call(EventType event, CallData* data) {
                 sys->id, iteration, Sys::boostedTick());
             ++rank_completion_count;
         }
+        if (et_feeder->isTemplateV2()) {
+            report_template_metrics();
+        }
         if (!pending_workloads.empty()) {
-            string next_workload = pending_workloads.front();
+            PendingWorkload next_workload = std::move(pending_workloads.front());
             pending_workloads.pop();
-            // there exists new workload, change the ETFeeder
-            if (this->et_feeder != nullptr)
-                delete this->et_feeder;
-            this->et_feeder = load_et_feeder(next_workload);
+            unique_ptr<WorkloadFeeder> next_feeder =
+                std::move(next_workload.prepared_feeder);
+            if (next_feeder == nullptr) {
+                next_feeder.reset(load_et_feeder(next_workload.et_filename));
+            }
             reset_iteration_tracking();
+            delete et_feeder;
+            et_feeder = next_feeder.release();
             iteration++;
             is_finished = false;
             // fire next iteration
@@ -620,8 +685,44 @@ void Workload::call(EventType event, CallData* data) {
 
 void Workload::add_workload(const std::string& new_filename,
                             const std::vector<Sys*>& systems) {
+    if (new_filename.rfind("template-v2", 0) == 0) {
+        vector<Workload*> targets;
+        targets.reserve(systems.size() + 1);
+        set<Workload*> unique_targets;
+        for (auto* managed_sys : systems) {
+            if (managed_sys == nullptr || managed_sys->workload == nullptr) {
+                throw invalid_argument(
+                    "null system or workload while adding template-v2 workload");
+            }
+            if (!unique_targets.insert(managed_sys->workload).second) {
+                throw invalid_argument(
+                    "duplicate managed workload in template-v2 command");
+            }
+            targets.push_back(managed_sys->workload);
+        }
+        if (!unique_targets.insert(this).second) {
+            throw invalid_argument(
+                "template-v2 managed workloads include the controller workload");
+        }
+        targets.push_back(this);
+        vector<unique_ptr<WorkloadFeeder>> prepared;
+        prepared.reserve(targets.size());
+        for (auto* workload : targets) {
+            prepared.push_back(workload->prepare_template_feeder(new_filename));
+        }
+        for (size_t index = 0; index < targets.size(); ++index) {
+            auto* workload = targets[index];
+            if (workload->is_finished && workload->pending_workloads.empty()) {
+                workload->install_feeder(std::move(prepared[index]));
+            } else {
+                workload->pending_workloads.push(
+                    PendingWorkload{"", std::move(prepared[index])});
+            }
+        }
+        return;
+    }
 
-    // add new workload filename to pending workloads in managed systems
+    // Preserve the existing Chakra ET path and queueing behavior.
     for (auto* managed_sys : systems) {
         if (managed_sys == nullptr || managed_sys->workload == nullptr) {
             LoggerFactory::get_logger("workload")
@@ -655,7 +756,8 @@ void Workload::add_workload(const std::string& new_filename,
             continue;
         }
         else{
-            managed_sys->workload->pending_workloads.push(workload_filename);
+            managed_sys->workload->pending_workloads.push(
+                PendingWorkload{workload_filename, nullptr});
         }
     }
     string workload_filename = new_filename + "." + to_string(sys->id) + ".et";
@@ -675,15 +777,7 @@ void Workload::add_workload(const std::string& new_filename,
         return;
     }
 
-    // there exists new workload, change the ETFeeder
-    if (this->et_feeder != nullptr)
-      delete this->et_feeder;
-    this->et_feeder = load_et_feeder(workload_filename);
-    reset_iteration_tracking();
-    iteration++;
-    is_finished = false;
-    // fire next iteration
-    fire();
+    install_feeder(unique_ptr<WorkloadFeeder>(load_et_feeder(workload_filename)));
 }
 
 void Workload::sleep_workload(const std::vector<Sys*>& systems) {

@@ -16,7 +16,8 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CommunicatorGroup.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/workload/HardwareResource.hh"
-#include "extern/graph_frontend/chakra/src/feeder/et_feeder.h"
+#include "astra-sim/workload/TemplateRegistry.hh"
+#include "astra-sim/workload/WorkloadFeeder.hh"
 
 namespace AstraSim {
 
@@ -58,7 +59,7 @@ class Workload : public Callable {
     void add_workload(const std::string& new_filename,
                       const std::vector<Sys*>& systems);
     void sleep_workload(const std::vector<Sys*>& systems);
-    Chakra::ETFeeder* load_et_feeder(const std::string& workload_filename);
+    WorkloadFeeder* load_et_feeder(const std::string& workload_filename);
 
     // stats
     void report();
@@ -66,7 +67,7 @@ class Workload : public Callable {
     bool emit_rank_completions = false;
     uint64_t rank_completion_count = 0;
 
-    Chakra::ETFeeder* et_feeder;
+    WorkloadFeeder* et_feeder;
     CommunicatorGroup* comm_group;
     HardwareResource* hw_resource;
     Sys* sys;
@@ -77,14 +78,25 @@ class Workload : public Callable {
     std::string filename;
 
     bool is_sleep;
-    std::queue<std::string> pending_workloads;
+    struct PendingWorkload {
+        std::string et_filename;
+        std::unique_ptr<WorkloadFeeder> prepared_feeder;
+    };
+    std::queue<PendingWorkload> pending_workloads;
 
   private:
+    std::unique_ptr<WorkloadFeeder> prepare_template_feeder(
+        const std::string& command);
+    void validate_feeder(const WorkloadFeeder& feeder) const;
+    void install_feeder(std::unique_ptr<WorkloadFeeder> feeder);
+    void report_template_metrics() const;
     void record_parent_completion(
         const std::shared_ptr<Chakra::ETFeederNode>& node);
     void reset_iteration_tracking();
     std::unordered_map<uint64_t, uint64_t> latest_parent_completion_ns_;
     std::unordered_map<uint64_t, std::shared_ptr<Chakra::ETFeederNode>> pending_memory_waits_;
+    TemplateRegistry template_registry_;
+    uint64_t et_read_count_ = 0;
 };
 
 }  // namespace AstraSim
