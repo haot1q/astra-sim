@@ -273,6 +273,135 @@ bool sibling_compute_nodes_share_the_workload_resource() {
            registry.activeFrameCount() == 0;
 }
 
+// Two sibling calls, each lowering to one leaf. The second call selects the
+// shared GPU compute resource or the independent CPU resource.
+Json two_call_definition(bool second_is_cpu) {
+    const auto leaf_template = [](const std::string& id, bool is_cpu_op) {
+        Json attrs = compute_attrs("$delay");
+        attrs["is_cpu_op"] = is_cpu_op;
+        return Json{{"id", id},
+                    {"ports", {{{"name", "delay"}, {"type", "uint64"}}}},
+                    {"nodes",
+                     {{{"id", "leaf"},
+                       {"kind", "compute"},
+                       {"deps", Json::array()},
+                       {"attrs", std::move(attrs)}}}}};
+    };
+    const auto call = [](const std::string& id, const std::string& target) {
+        return Json{{"id", id},
+                    {"kind", "call"},
+                    {"deps", Json::array()},
+                    {"template", target},
+                    {"bindings", {{"delay", "$parent_delay"}}}};
+    };
+    const std::string second = second_is_cpu ? "cpu_child" : "gpu_child";
+    const Json parent = {
+        {"id", "parent"},
+        {"ports", {{{"name", "parent_delay"}, {"type", "uint64"}}}},
+        {"nodes", {call("first", "gpu_child"), call("second", second)}}};
+    return definition_with_templates({leaf_template("gpu_child", false),
+                                      leaf_template("cpu_child", true),
+                                      parent});
+}
+
+// Mirror the arbitration in Workload::issue_dep_free_nodes without a full Sys:
+// drain the ready queue, occupy what the resource allows, and push the rest
+// back. A deferred leaf must be re-offered later, exactly once.
+struct ArbitrationPass {
+    std::vector<std::shared_ptr<Chakra::ETFeederNode>> issued;
+    std::vector<uint64_t> deferred;
+};
+
+ArbitrationPass arbitrate(AstraSim::WorkloadFeeder& feeder,
+                          AstraSim::HardwareResource& resource) {
+    ArbitrationPass pass;
+    auto node = feeder.getNextIssuableNode();
+    while (node != nullptr) {
+        if (resource.is_available(node)) {
+            resource.occupy(node);
+            pass.issued.push_back(node);
+        } else {
+            pass.deferred.push_back(node->id());
+        }
+        node = feeder.getNextIssuableNode();
+    }
+    for (const auto node_id : pass.deferred) {
+        feeder.pushBackIssuableNode(node_id);
+    }
+    return pass;
+}
+
+void retire(AstraSim::WorkloadFeeder& feeder,
+            AstraSim::HardwareResource& resource,
+            const std::shared_ptr<Chakra::ETFeederNode>& node) {
+    resource.release(node);
+    feeder.freeChildrenNodes(node->id());
+    feeder.removeNode(node->id());
+}
+
+bool concurrent_calls_queue_on_shared_and_overlap_on_independent_resources() {
+    TemplateRegistry registry;
+    std::vector<uint64_t> shared_order;
+    bool shared_deferred_once = false;
+    {
+        const auto definition_json = two_call_definition(false);
+        const auto definition_path = write_json(
+            "astra-template-v2-shared-definition.json", definition_json);
+        const auto invocation_path =
+            write_json("astra-template-v2-shared-invocation.json",
+                       invocation(definition_json, 5U));
+        const auto definition = registry.loadDefinition(definition_path);
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(invocation_path, 0, *definition),
+            &registry);
+        AstraSim::HardwareResource resource(1);
+        auto first = arbitrate(feeder, resource);
+        shared_deferred_once =
+            first.issued.size() == 1 && first.deferred.size() == 1;
+        if (!shared_deferred_once) return false;
+        shared_order.push_back(first.issued.front()->id());
+        retire(feeder, resource, first.issued.front());
+        auto second = arbitrate(feeder, resource);
+        if (second.issued.size() != 1 || !second.deferred.empty()) return false;
+        shared_order.push_back(second.issued.front()->id());
+        retire(feeder, resource, second.issued.front());
+        if (feeder.hasNodesToIssue() || registry.activeFrameCount() != 0) {
+            return false;
+        }
+        std::remove(definition_path.c_str());
+        std::remove(invocation_path.c_str());
+    }
+
+    bool overlapped = false;
+    {
+        const auto definition_json = two_call_definition(true);
+        const auto definition_path = write_json(
+            "astra-template-v2-independent-definition.json", definition_json);
+        const auto invocation_path =
+            write_json("astra-template-v2-independent-invocation.json",
+                       invocation(definition_json, 5U));
+        const auto definition = registry.loadDefinition(definition_path);
+        TemplateWorkloadFeeder feeder(
+            definition, registry.loadInvocation(invocation_path, 0, *definition),
+            &registry);
+        AstraSim::HardwareResource resource(1);
+        auto pass = arbitrate(feeder, resource);
+        overlapped = pass.issued.size() == 2 && pass.deferred.empty() &&
+                     resource.num_in_flight_gpu_comp_ops == 1 &&
+                     resource.num_in_flight_cpu_ops == 1;
+        for (const auto& node : pass.issued) retire(feeder, resource, node);
+        if (feeder.hasNodesToIssue() || registry.activeFrameCount() != 0) {
+            return false;
+        }
+        std::remove(definition_path.c_str());
+        std::remove(invocation_path.c_str());
+    }
+
+    return shared_deferred_once && overlapped &&
+           shared_order.size() == 2 && shared_order[0] != shared_order[1] &&
+           registry.materializedLeafCount() == 0;
+}
+
 bool recorded_compute_allows_zero_tensor_size() {
     TemplateRegistry registry;
     auto definition_json = valid_definition();
@@ -481,6 +610,7 @@ int main() {
     return repeated_nested_invocations_are_isolated() &&
                    rejects_bad_binding_and_call_cycle() &&
                    sibling_compute_nodes_share_the_workload_resource() &&
+                   concurrent_calls_queue_on_shared_and_overlap_on_independent_resources() &&
                    recorded_compute_allows_zero_tensor_size() &&
                    native_memory_tier_ids_are_not_limited_to_legacy_slots() &&
                    template_invocation_matches_the_reference_et_of_the_same_dag() &&
