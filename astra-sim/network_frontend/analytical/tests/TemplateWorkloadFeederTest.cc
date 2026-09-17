@@ -669,12 +669,13 @@ std::vector<uint64_t> drain_tensor_sizes(AstraSim::WorkloadFeeder& feeder) {
 // H growth rebinds bytes on the same compiled skeleton. The leaf DAG length
 // stays one; only tensor_size changes. A second load of the same file must not
 // compile another plan.
-bool kv_growth_rebinds_bytes_without_recompiling_the_plan() {
+bool h65k_b4_rebinds_without_recompiling_the_plan() {
     TemplateRegistry registry;
     const Json step = {
         {"id", "step"},
         {"ports",
          {{{"name", "history_bytes"}, {"type", "uint64"}},
+          {{"name", "batch_size"}, {"type", "uint64"}},
           {{"name", "step_delay"}, {"type", "uint64"}}}},
         {"nodes",
          {{{"id", "work"},
@@ -692,11 +693,15 @@ bool kv_growth_rebinds_bytes_without_recompiling_the_plan() {
     const auto first_path = write_json(
         "astra-template-v2-kv-growth-invocation-0.json",
         rank_invocation(definition_json, "step",
-                        {{"history_bytes", 8U}, {"step_delay", 4U}}));
+                        {{"history_bytes", 4096U},
+                         {"batch_size", 2U},
+                         {"step_delay", 4U}}));
     const auto second_path = write_json(
         "astra-template-v2-kv-growth-invocation-1.json",
         rank_invocation(definition_json, "step",
-                        {{"history_bytes", 32U}, {"step_delay", 4U}}));
+                        {{"history_bytes", 65663U},
+                         {"batch_size", 4U},
+                         {"step_delay", 4U}}));
     const auto definition = registry.loadDefinition(definition_path);
     const auto first_plans = registry.planCompilationCount();
     std::vector<uint64_t> first_sizes;
@@ -725,9 +730,10 @@ bool kv_growth_rebinds_bytes_without_recompiling_the_plan() {
     std::remove(second_path.c_str());
     return first_plans == 1 && registry.planCompilationCount() == 1 &&
            registry.definitionLoadCount() == 1 &&
-           first_sizes == std::vector<uint64_t>({8}) &&
+           registry.invocationCount() == 2 &&
+           first_sizes == std::vector<uint64_t>({4096}) &&
            first_runtimes == std::vector<uint64_t>({4}) &&
-           second_sizes == std::vector<uint64_t>({32}) &&
+           second_sizes == std::vector<uint64_t>({65663}) &&
            registry.activeFrameCount() == 0;
 }
 
@@ -903,7 +909,7 @@ int main() {
                    abandoning_an_in_flight_invocation_releases_all_registry_state() &&
                    recorded_compute_allows_zero_tensor_size() &&
                    native_memory_tier_ids_are_not_limited_to_legacy_slots() &&
-                   kv_growth_rebinds_bytes_without_recompiling_the_plan() &&
+                   h65k_b4_rebinds_without_recompiling_the_plan() &&
                    structure_variant_is_a_separate_compiled_template() &&
                    memory_leaf_with_compute_dependent_is_not_isolated_preparation() &&
                    template_idle_feeder_is_empty_and_fail_closed() &&

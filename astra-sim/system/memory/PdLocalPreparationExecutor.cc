@@ -8,6 +8,7 @@ This source code is licensed under the MIT license found in the LICENSE file.
 #include <utility>
 
 #include "MemoryPreparationTrace.hh"
+#include "MemoryPreparationWire.hh"
 #include "PipelinePreparationIdentity.hh"
 #include "ServiceBindingJson.hh"
 #include "astra-sim/system/Sys.hh"
@@ -86,16 +87,30 @@ PdLocalPreparationExecutor::PdLocalPreparationExecutor(const std::vector<Sys*>& 
 std::vector<PdLocalPreparationExecutor::Submission>
 PdLocalPreparationExecutor::read_work(const std::string& path) const {
     const auto work = Wire::read(path);
-    const bool staged = work.at("schema_version") == "pd-local-preparation-v2";
+    const bool direct =
+        work.at("schema_version") == "pd-local-preparation-v3";
+    const bool staged = direct
+        ? work.contains("pipeline_stage") || work.contains("endpoint")
+        : work.at("schema_version") == "pd-local-preparation-v2";
+    if (direct &&
+        work.contains("pipeline_stage") != work.contains("endpoint")) {
+        throw std::invalid_argument(
+            "direct preparation requires stage and endpoint together");
+    }
     auto envelope = work;
     if (staged) {
         envelope.erase("pipeline_stage");
         envelope.erase("endpoint");
     }
-    Wire::fields(envelope, {"schema_version", "run_id", "attempt_id", "transfer_id",
-        "preparation_id", "instance_id", "manifest_digest", "service_binding_digest",
-        "service_activation_id", "backend_instance_id", "rank_traces"});
-    if (!staged && work.at("schema_version") != "pd-local-preparation-v1") {
+    Wire::fields(
+        envelope,
+        {"schema_version", "run_id", "attempt_id", "transfer_id",
+         "preparation_id", "instance_id", "manifest_digest",
+         "service_binding_digest", "service_activation_id",
+         "backend_instance_id",
+         direct ? "rank_events" : "rank_traces"});
+    if (!direct && !staged &&
+        work.at("schema_version") != "pd-local-preparation-v1") {
         throw std::invalid_argument("unsupported preparation work schema");
     }
     const auto owner = identity(work);
@@ -107,8 +122,14 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
     std::set<uint32_t> ranks;
     std::set<std::string> physical_ids;
     std::set<std::string> expected_logical;
-    for (const auto& item : Wire::array(work.at("rank_traces"))) {
-        Wire::fields(item, {"rank", "trace_path", "events"});
+    const auto& rank_work =
+        work.at(direct ? "rank_events" : "rank_traces");
+    for (const auto& item : Wire::array(rank_work)) {
+        if (direct) {
+            Wire::fields(item, {"rank", "event_path", "events"});
+        } else {
+            Wire::fields(item, {"rank", "trace_path", "events"});
+        }
         const auto rank = Wire::uint32(item.at("rank"));
         if (rank >= systems_.size() || (!ranks.empty() && rank <= *ranks.rbegin())) {
             throw std::invalid_argument("preparation ranks must be actual, sorted, and unique");
@@ -136,21 +157,45 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
         if (logical_ids != expected_logical) {
             throw std::invalid_argument("preparation rank has an incomplete logical event set");
         }
-        const auto trace = read_memory_preparation_trace(
-            text(item.at("trace_path")), rank_events.size());
-        if (trace.pipeline_stage_digest != stage.digest) {
-            throw std::invalid_argument("preparation ET stage digest differs from original work");
-        }
         auto& system = *systems_.at(rank);
-        system.validate_tier_manifest_digest(trace.manifest_digest);
-        system.validate_service_metadata(trace.binding_digest, trace.activation_id, trace.rank);
-        if (trace.rank != rank || trace.manifest_digest != owner.at("manifest_digest") ||
-            trace.binding_digest != owner.at("service_binding_digest") ||
-            trace.activation_id != owner.at("service_activation_id")) {
-            throw std::invalid_argument("preparation ET/envelope metadata mismatch");
-        }
+        system.validate_tier_manifest_digest(
+            text(owner.at("manifest_digest")));
+        system.validate_service_metadata(
+            text(owner.at("service_binding_digest")),
+            text(owner.at("service_activation_id")), rank);
         std::set<std::string> observed;
-        for (const auto& node : trace.nodes) {
+        std::vector<std::shared_ptr<Chakra::ETFeederNode>> nodes;
+        if (direct) {
+            const auto sidecar = Wire::read(text(item.at("event_path")));
+            if (text(sidecar.at("run_id")) != owner.at("run_id") ||
+                text(sidecar.at("instance_id")) != owner.at("instance_id") ||
+                text(sidecar.at("manifest_digest")) !=
+                    owner.at("manifest_digest")) {
+                throw std::invalid_argument(
+                    "direct preparation event/envelope identity mismatch");
+            }
+            for (const auto& event : Wire::array(sidecar.at("events"))) {
+                nodes.push_back(direct_movement_node(
+                    sidecar, event, rank, nodes.size() + 1));
+            }
+            if (nodes.size() != rank_events.size()) {
+                throw std::invalid_argument(
+                    "direct preparation event set cardinality differs");
+            }
+        } else {
+            const auto trace = read_memory_preparation_trace(
+                text(item.at("trace_path")), rank_events.size());
+            if (trace.pipeline_stage_digest != stage.digest ||
+                trace.rank != rank ||
+                trace.manifest_digest != owner.at("manifest_digest") ||
+                trace.binding_digest != owner.at("service_binding_digest") ||
+                trace.activation_id != owner.at("service_activation_id")) {
+                throw std::invalid_argument(
+                    "preparation ET/envelope metadata mismatch");
+            }
+            nodes = trace.nodes;
+        }
+        for (const auto& node : nodes) {
             const auto event_id = attribute(node, "movement_event_id");
             if (!rank_events.count(event_id) || !observed.insert(event_id).second) {
                 throw std::invalid_argument("preparation ET event mapping mismatch");
