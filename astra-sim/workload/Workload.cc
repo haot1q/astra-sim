@@ -705,19 +705,19 @@ void Workload::add_workload(const std::string& new_filename,
                 "template-v2 managed workloads include the controller workload");
         }
         targets.push_back(this);
+        for (const auto* workload : targets) {
+            if (!workload->is_finished || !workload->pending_workloads.empty()) {
+                throw invalid_argument(
+                    "template-v2 invocation pipelining is not supported");
+            }
+        }
         vector<unique_ptr<WorkloadFeeder>> prepared;
         prepared.reserve(targets.size());
         for (auto* workload : targets) {
             prepared.push_back(workload->prepare_template_feeder(new_filename));
         }
         for (size_t index = 0; index < targets.size(); ++index) {
-            auto* workload = targets[index];
-            if (workload->is_finished && workload->pending_workloads.empty()) {
-                workload->install_feeder(std::move(prepared[index]));
-            } else {
-                workload->pending_workloads.push(
-                    PendingWorkload{"", std::move(prepared[index])});
-            }
+            targets[index]->install_feeder(std::move(prepared[index]));
         }
         return;
     }
