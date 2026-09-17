@@ -15,10 +15,13 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/workload/HardwareResource.hh"
 #include "astra-sim/workload/TemplateRegistry.hh"
 #include "astra-sim/workload/TemplateWorkloadFeeder.hh"
+#include "astra-sim/workload/WorkloadFeeder.hh"
+#include "protoio.hh"
 
 namespace {
 
 using Json = nlohmann::json;
+using AstraSim::ChakraEtWorkloadFeeder;
 using AstraSim::ServiceBindingJson::digest;
 using AstraSim::TemplateRegistry;
 using AstraSim::TemplateWorkloadFeeder;
@@ -101,7 +104,7 @@ Json invocation(const Json& definition, uint64_t delay) {
                {"bindings", {{"parent_delay", delay}}}}}}};
 }
 
-std::vector<uint64_t> drain(TemplateWorkloadFeeder& feeder) {
+std::vector<uint64_t> drain(AstraSim::WorkloadFeeder& feeder) {
     std::vector<uint64_t> runtimes;
     while (feeder.hasNodesToIssue()) {
         auto node = feeder.getNextIssuableNode();
@@ -354,6 +357,92 @@ bool native_memory_tier_ids_are_not_limited_to_legacy_slots() {
            registry.materializedLeafCount() == 0;
 }
 
+// The nested definition lowers to one chain of six compute leaves. Write that
+// same chain as a real Chakra ET so the reference feeder and the template
+// feeder can be compared directly, instead of asserting a precomputed sum.
+std::string write_reference_et(const std::string& name, uint64_t delay) {
+    const auto path = (std::filesystem::temp_directory_path() / name).string();
+    ProtoOutputStream stream(path);
+    ChakraProtoMsg::GlobalMetadata metadata;
+    for (const auto& entry :
+         std::vector<std::pair<std::string, std::string>>{
+             {"tier_manifest_digest", "sha256:tier"},
+             {"service_binding_digest", "sha256:service"},
+             {"service_activation_id", "activation"}}) {
+        auto* attribute = metadata.add_attr();
+        attribute->set_name(entry.first);
+        attribute->set_string_val(entry.second);
+    }
+    auto* rank = metadata.add_attr();
+    rank->set_name("service_rank");
+    rank->set_uint64_val(0U);
+    stream.write(metadata);
+    for (uint64_t id = 1; id <= 6; ++id) {
+        ChakraProtoMsg::Node node;
+        node.set_id(id);
+        node.set_name("reference-leaf-" + std::to_string(id));
+        node.set_type(ChakraProtoMsg::COMP_NODE);
+        node.set_duration_micros(delay);
+        if (id > 1) node.add_data_deps(id - 1);
+        for (const auto& entry :
+             std::vector<std::pair<std::string, uint64_t>>{{"num_ops", 0U},
+                                                           {"tensor_size", 1U}}) {
+            auto* attribute = node.add_attr();
+            attribute->set_name(entry.first);
+            attribute->set_uint64_val(entry.second);
+        }
+        auto* cpu = node.add_attr();
+        cpu->set_name("is_cpu_op");
+        cpu->set_bool_val(false);
+        stream.write(node);
+    }
+    return path;
+}
+
+bool template_invocation_matches_the_reference_et_of_the_same_dag() {
+    constexpr uint64_t kDelay = 5;
+    TemplateRegistry registry;
+    const auto definition_json = valid_definition();
+    const auto definition_path =
+        write_json("astra-template-v2-differential-definition.json",
+                   definition_json);
+    const auto invocation_path =
+        write_json("astra-template-v2-differential-invocation.json",
+                   invocation(definition_json, kDelay));
+    const auto definition = registry.loadDefinition(definition_path);
+    TemplateWorkloadFeeder templated(
+        definition, registry.loadInvocation(invocation_path, 0, *definition),
+        &registry);
+    const auto template_identity =
+        std::vector<std::string>({templated.tierManifestDigest(),
+                                  templated.serviceBindingDigest(),
+                                  templated.serviceActivationId()});
+    const auto template_rank = templated.serviceRank();
+    const auto template_work = drain(templated);
+
+    const auto et_path =
+        write_reference_et("astra-template-v2-differential-reference.et", kDelay);
+    ChakraEtWorkloadFeeder reference(et_path);
+    const auto reference_identity =
+        std::vector<std::string>({reference.tierManifestDigest(),
+                                  reference.serviceBindingDigest(),
+                                  reference.serviceActivationId()});
+    const auto reference_rank = reference.serviceRank();
+    const auto reference_work = drain(reference);
+
+    std::remove(definition_path.c_str());
+    std::remove(invocation_path.c_str());
+    std::remove(et_path.c_str());
+    return template_work ==
+               std::vector<uint64_t>(6, kDelay) &&
+           template_work == reference_work &&
+           template_identity == reference_identity &&
+           template_rank == reference_rank &&
+           !templated.hasNodesToIssue() && !reference.hasNodesToIssue() &&
+           registry.activeFrameCount() == 0 &&
+           registry.materializedLeafCount() == 0;
+}
+
 // The frontend controller parses one frozen, ordered metrics line. Pin the
 // exact text here so a renamed or reordered field fails in the backend instead
 // of silently dropping mechanism evidence. Executing after both JSON files are
@@ -394,6 +483,7 @@ int main() {
                    sibling_compute_nodes_share_the_workload_resource() &&
                    recorded_compute_allows_zero_tensor_size() &&
                    native_memory_tier_ids_are_not_limited_to_legacy_slots() &&
+                   template_invocation_matches_the_reference_et_of_the_same_dag() &&
                    mechanism_metrics_line_is_a_stable_ordered_protocol()
                ? 0
                : 1;
