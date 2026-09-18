@@ -10,6 +10,7 @@ LICENSE file in the root directory of this source tree.
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "astra-sim/workload/IndexedTemplatePlan.hh"
 #include "astra-sim/workload/TemplateFileIdentity.hh"
@@ -25,6 +26,10 @@ class IndexedTemplateRegistry {
     IndexedTemplatePlan compile(const std::string& definition_path,
                                 const std::string& invocation_path,
                                 uint32_t expected_rank);
+    std::vector<IndexedTemplatePlan> compileProgram(
+        const std::string& definition_path,
+        const std::string& invocation_path,
+        uint32_t expected_rank);
 
     uint64_t definitionLoadCount() const { return definition_load_count_; }
     uint64_t planCompilationCount() const { return plan_compilation_count_; }
@@ -49,10 +54,15 @@ class IndexedTemplateRegistry {
 };
 
 class IndexedTemplateWorkloadFeeder;
+class IndexedTemplateProgramFeeder;
 
 std::string format_indexed_template_metrics_line(
     uint32_t rank, const IndexedTemplateRegistry& registry,
     const IndexedTemplateWorkloadFeeder& feeder, uint64_t et_read_count,
+    uint64_t exposure_baselines);
+std::string format_indexed_template_program_metrics_line(
+    uint32_t rank, const IndexedTemplateRegistry& registry,
+    const IndexedTemplateProgramFeeder& feeder, uint64_t et_read_count,
     uint64_t exposure_baselines);
 
 }  // namespace AstraSim

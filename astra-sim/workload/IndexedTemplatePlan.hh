@@ -21,6 +21,7 @@ enum class IndexedEdgeRelation {
     SameIndex,
     SameOuter,
     AllToOne,
+    AllToAll,
     OneToAll,
     OneToOne,
 };
@@ -84,6 +85,7 @@ class IndexedTemplatePlan {
     const std::vector<IndexedTemplateRecipe>& recipes() const;
     const std::vector<IndexedTemplateEdge>& edges() const;
     uint64_t eventCount() const;
+    void offsetEventIds(uint64_t offset);
     uint32_t rank() const;
     const std::string& tierManifestDigest() const;
     const std::string& serviceBindingDigest() const;

@@ -15,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include "astra-sim/system/memory/UcieTransport.hh"
 #include "astra-sim/workload/IndexedTemplateWorkloadFeeder.hh"
+#include "astra-sim/workload/IndexedTemplateProgramFeeder.hh"
 #include "astra-sim/workload/TemplateWorkloadFeeder.hh"
 #include <json/json.hpp>
 
@@ -108,16 +109,26 @@ unique_ptr<WorkloadFeeder> Workload::prepare_template_feeder(
     string invocation_path;
     string extra;
     if (!(input >> keyword >> definition_path >> invocation_path) ||
-        (keyword != "template-v2" && keyword != "template-v3") ||
+        (keyword != "template-v2" && keyword != "template-v3" &&
+         keyword != "template-v3-program") ||
         (input >> extra)) {
         throw invalid_argument(
-            "template command must be exactly: template-v2|template-v3 "
+            "template command must be exactly: "
+            "template-v2|template-v3|template-v3-program "
             "<definition-json-path> <invocation-json-path>");
     }
     if (access(definition_path.c_str(), R_OK) < 0 ||
         access(invocation_path.c_str(), R_OK) < 0) {
         throw invalid_argument(keyword +
                                " definition/invocation path is not readable");
+    }
+    if (keyword == "template-v3-program") {
+        auto feeder = make_unique<IndexedTemplateProgramFeeder>(
+            indexed_registry_.compileProgram(
+                definition_path, invocation_path,
+                static_cast<uint32_t>(sys->id)));
+        validate_feeder(*feeder);
+        return feeder;
     }
     if (keyword == "template-v3") {
         auto feeder = make_unique<IndexedTemplateWorkloadFeeder>(
@@ -151,10 +162,16 @@ void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder) {
 void Workload::report_template_metrics() const {
     const auto* indexed =
         dynamic_cast<const IndexedTemplateWorkloadFeeder*>(et_feeder);
+    const auto* program =
+        dynamic_cast<const IndexedTemplateProgramFeeder*>(et_feeder);
     const string line =
         indexed != nullptr
             ? format_indexed_template_metrics_line(
                   static_cast<uint32_t>(sys->id), indexed_registry_, *indexed,
+                  et_read_count_, latest_parent_completion_ns_.size())
+            : program != nullptr
+            ? format_indexed_template_program_metrics_line(
+                  static_cast<uint32_t>(sys->id), indexed_registry_, *program,
                   et_read_count_, latest_parent_completion_ns_.size())
             : format_template_metrics_line(static_cast<uint32_t>(sys->id),
                                            template_registry_, et_read_count_);
@@ -639,6 +656,9 @@ void Workload::call(EventType event, CallData* data) {
         delete collective_comm_wrapper_map[int_data->data];
         collective_comm_wrapper_map.erase(int_data->data);
         et_feeder->removeNode(node_id);
+        if (dynamic_cast<IndexedTemplateProgramFeeder*>(et_feeder) != nullptr) {
+            issue_dep_free_nodes();
+        }
 
     } else {
         if (data == nullptr) {
@@ -669,6 +689,9 @@ void Workload::call(EventType event, CallData* data) {
             issue_dep_free_nodes();
 
             et_feeder->removeNode(wlhd->node_id);
+            if (dynamic_cast<IndexedTemplateProgramFeeder*>(et_feeder) != nullptr) {
+                issue_dep_free_nodes();
+            }
             delete wlhd;
         }
     }

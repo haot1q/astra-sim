@@ -59,6 +59,7 @@ IndexedEdgeRelation relation(const Json& value) {
     if (name == "same_index") return IndexedEdgeRelation::SameIndex;
     if (name == "same_outer") return IndexedEdgeRelation::SameOuter;
     if (name == "all_to_one") return IndexedEdgeRelation::AllToOne;
+    if (name == "all_to_all") return IndexedEdgeRelation::AllToAll;
     if (name == "one_to_all") return IndexedEdgeRelation::OneToAll;
     if (name == "one_to_one") return IndexedEdgeRelation::OneToOne;
     throw std::invalid_argument(
@@ -390,6 +391,10 @@ void IndexedTemplatePlan::loadEdges(const Json& definition) {
             require(source.domain.has_value() &&
                         !destination.domain.has_value(),
                     "all_to_one requires repeated source and static target");
+        } else if (edge_relation == IndexedEdgeRelation::AllToAll) {
+            require(source.domain.has_value() &&
+                        destination.domain.has_value(),
+                    "all_to_all requires repeated source and target");
         } else if (edge_relation == IndexedEdgeRelation::OneToAll) {
             require(!source.domain.has_value() &&
                         destination.domain.has_value(),
@@ -420,8 +425,7 @@ void IndexedTemplatePlan::validateGraph() const {
 }
 
 IndexedTemplateEvent IndexedTemplatePlan::event(uint64_t event_id) const {
-    require(event_id > 0 && event_id <= event_count_,
-            "event id is outside the plan");
+    require(event_id > 0, "event id is outside the plan");
     const auto found = std::find_if(
         recipes_.begin(), recipes_.end(), [&](const auto& recipe) {
             if (event_id < recipe.base_id) return false;
@@ -473,7 +477,8 @@ std::vector<IndexedTemplateEvent> IndexedTemplatePlan::children(
             }
             continue;
         }
-        if (edge.relation == IndexedEdgeRelation::OneToAll) {
+        if (edge.relation == IndexedEdgeRelation::OneToAll ||
+            edge.relation == IndexedEdgeRelation::AllToAll) {
             const auto count = recipes_.at(edge.to_recipe).count;
             for (uint64_t index = 0; index < count; ++index) {
                 result.push_back(
@@ -494,6 +499,7 @@ std::vector<uint64_t> IndexedTemplatePlan::fixedParentIds(
     for (const auto& edge : edges_) {
         if (edge.to_recipe != event.recipe ||
             edge.relation == IndexedEdgeRelation::AllToOne ||
+            edge.relation == IndexedEdgeRelation::AllToAll ||
             edge.relation == IndexedEdgeRelation::SameOuter) {
             continue;
         }
@@ -513,6 +519,8 @@ uint64_t IndexedTemplatePlan::requiredParentCount(
             result,
             edge.relation == IndexedEdgeRelation::AllToOne
                 ? recipes_.at(edge.from_recipe).count
+                : edge.relation == IndexedEdgeRelation::AllToAll
+                ? recipes_.at(edge.from_recipe).count
                 : edge.relation == IndexedEdgeRelation::SameOuter
                 ? (recipes_.at(edge.from_recipe).count == 0
                        ? 0
@@ -531,6 +539,7 @@ bool IndexedTemplatePlan::isAllToOne(
         connecting_edge(edges_, parent.recipe, child.recipe);
     require(edge != nullptr, "events are not connected");
     return edge->relation == IndexedEdgeRelation::AllToOne ||
+           edge->relation == IndexedEdgeRelation::AllToAll ||
            edge->relation == IndexedEdgeRelation::SameOuter;
 }
 
@@ -548,6 +557,7 @@ bool IndexedTemplatePlan::exposeChildAfterCompletion(
         edges_.begin(), edges_.end(), [&](const auto& item) {
             return item.to_recipe == child.recipe &&
                    (item.relation == IndexedEdgeRelation::AllToOne ||
+                    item.relation == IndexedEdgeRelation::AllToAll ||
                     item.relation == IndexedEdgeRelation::SameOuter);
         });
     return !joined ||
@@ -562,6 +572,12 @@ const std::vector<IndexedTemplateEdge>& IndexedTemplatePlan::edges() const {
     return edges_;
 }
 uint64_t IndexedTemplatePlan::eventCount() const { return event_count_; }
+void IndexedTemplatePlan::offsetEventIds(uint64_t offset) {
+    for (auto& recipe : recipes_) {
+        recipe.base_id = checkedIndexedAdd(
+            recipe.base_id, offset, "program event id");
+    }
+}
 uint32_t IndexedTemplatePlan::rank() const { return rank_; }
 const std::string& IndexedTemplatePlan::tierManifestDigest() const {
     return tier_manifest_digest_;

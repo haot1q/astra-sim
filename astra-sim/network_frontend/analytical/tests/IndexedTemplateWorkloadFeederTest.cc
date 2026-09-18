@@ -14,12 +14,16 @@ LICENSE file in the root directory of this source tree.
 #include <vector>
 
 #include "astra-sim/workload/IndexedTemplatePlan.hh"
+#include "astra-sim/workload/IndexedTemplateProgramFeeder.hh"
+#include "astra-sim/workload/IndexedTemplateRegistry.hh"
 #include "astra-sim/workload/IndexedTemplateWorkloadFeeder.hh"
 
 namespace {
 
 using Json = nlohmann::json;
 using AstraSim::IndexedTemplatePlan;
+using AstraSim::IndexedTemplateProgramFeeder;
+using AstraSim::IndexedTemplateRegistry;
 using AstraSim::IndexedTemplateWorkloadFeeder;
 
 Json expression(const std::string& operation, Json arguments) {
@@ -193,7 +197,8 @@ struct Observed {
     bool child_contract_valid = true;
 };
 
-Observed drain(IndexedTemplateWorkloadFeeder& feeder) {
+template <typename Feeder>
+Observed drain(Feeder& feeder) {
     Observed result;
     while (feeder.hasNodesToIssue()) {
         auto node = feeder.getNextIssuableNode();
@@ -625,8 +630,23 @@ Json read_json(const char* path) {
 bool external_wire_drains(const char* definition_path,
                           const char* invocation_path,
                           const char* rank_text) {
+    const auto definition = read_json(definition_path);
+    if (definition.value("schema_version", std::string()) ==
+        "template-definition-v3-program-proof") {
+        IndexedTemplateRegistry registry;
+        IndexedTemplateProgramFeeder feeder(registry.compileProgram(
+            definition_path, invocation_path,
+            static_cast<uint32_t>(std::stoul(rank_text))));
+        const auto work = drain(feeder);
+        std::cout << "INDEXED_TEMPLATE_DRAIN events=" << work.event_count
+                  << " peak=" << feeder.peakTrackedEventCount()
+                  << " tracked=" << feeder.trackedEventCount()
+                  << " calls=" << feeder.completedCallCount() << std::endl;
+        return work.child_contract_valid && feeder.trackedEventCount() == 0 &&
+               feeder.materializedEventCount() == 0;
+    }
     IndexedTemplateWorkloadFeeder feeder(IndexedTemplatePlan::compile(
-        read_json(definition_path), read_json(invocation_path),
+        definition, read_json(invocation_path),
         static_cast<uint32_t>(std::stoul(rank_text))));
     const auto work = drain(feeder);
     std::cout << "INDEXED_TEMPLATE_DRAIN events=" << work.event_count
