@@ -502,6 +502,45 @@ bool two_axis_domain_preserves_tuple_indices() {
            work.child_contract_valid && feeder.trackedEventCount() == 0;
 }
 
+bool same_outer_allows_an_inactive_suffix() {
+    auto raw_definition = two_axis_definition();
+    raw_definition["ports"].push_back(
+        Json{{"name", "tail"}, {"type", "uint64"}});
+    raw_definition["domains"].push_back(
+        Json{{"id", "tail_rows"},
+             {"axes", Json::array({
+                  Json{{"id", "token"},
+                       {"extent", expression("param", "tail")}}})}});
+    raw_definition["recipes"].push_back(
+        Json{{"id", "tail_compute"},
+             {"kind", "compute"},
+             {"domain", "tail_rows"},
+             {"attrs",
+              {{"duration_ns", 1U},
+               {"num_ops", 1U},
+               {"tensor_size", 1U},
+               {"is_cpu_op", false}}}});
+    raw_definition["edges"].push_back(
+        Json{{"from", "scale"},
+             {"to", "tail_compute"},
+             {"relation", "same_outer"}});
+    raw_definition["definition_digest"] =
+        IndexedTemplatePlan::definitionDigest(raw_definition);
+    const Json invocation = {
+        {"schema_version", "template-invocation-v3-proof"},
+        {"definition_id", raw_definition.at("template_id")},
+        {"definition_digest", raw_definition.at("definition_digest")},
+        {"ranks", Json::array({
+             Json{{"rank", 0U},
+                  {"bindings", {{"tokens", 2U}, {"tail", 0U}}}}})},
+    };
+    IndexedTemplateWorkloadFeeder feeder(IndexedTemplatePlan::compile(
+        raw_definition, invocation, 0));
+    const auto work = drain(feeder);
+    return work.event_count == 7 && work.child_contract_valid &&
+           feeder.trackedEventCount() == 0;
+}
+
 bool invalid_inputs_fail_before_any_event() {
     const auto raw_definition = definition();
     auto production_schema = raw_definition;
@@ -617,6 +656,7 @@ int main() {
                    issue_all_ready_tracks_the_actual_dag_width() &&
                    bound_vectors_supply_per_entry_residency() &&
                    two_axis_domain_preserves_tuple_indices() &&
+                   same_outer_allows_an_inactive_suffix() &&
                    invalid_inputs_fail_before_any_event()
                ? 0
                : 1;

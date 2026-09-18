@@ -380,8 +380,9 @@ void IndexedTemplatePlan::loadEdges(const Json& definition) {
                         !source.axes.empty() &&
                         !destination.axes.empty() &&
                         source.axes.front() == destination.axes.front() &&
-                        source.extents.front() ==
-                            destination.extents.front(),
+                        (source.extents.front() ==
+                             destination.extents.front() ||
+                         destination.count == 0),
                     "same_outer requires repeated domains with one common "
                     "outer axis");
         } else if (edge_relation == IndexedEdgeRelation::AllToOne) {
@@ -462,6 +463,7 @@ std::vector<IndexedTemplateEvent> IndexedTemplatePlan::children(
         if (edge.relation == IndexedEdgeRelation::SameOuter) {
             const auto& source = recipes_.at(edge.from_recipe);
             const auto& target = recipes_.at(edge.to_recipe);
+            if (target.count == 0) continue;
             const auto outer = event.indices.at(source.axes.front());
             const auto inner = target.count / target.extents.front();
             for (uint64_t offset = 0; offset < inner; ++offset) {
