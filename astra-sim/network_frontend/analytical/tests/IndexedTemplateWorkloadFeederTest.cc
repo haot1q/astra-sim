@@ -5,8 +5,12 @@ LICENSE file in the root directory of this source tree.
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "astra-sim/workload/IndexedTemplatePlan.hh"
@@ -388,9 +392,49 @@ bool invalid_inputs_fail_before_any_event() {
     return true;
 }
 
+Json read_json(const char* path) {
+    std::ifstream stream(path);
+    if (!stream) {
+        throw std::invalid_argument(
+            std::string("cannot read indexed template file ") + path);
+    }
+    Json result;
+    stream >> result;
+    return result;
+}
+
+// Cross-language check: a definition/invocation pair written by the Python
+// wire must compile and drain here without any local JSON construction.
+bool external_wire_drains(const char* definition_path,
+                          const char* invocation_path,
+                          const char* rank_text) {
+    IndexedTemplateWorkloadFeeder feeder(IndexedTemplatePlan::compile(
+        read_json(definition_path), read_json(invocation_path),
+        static_cast<uint32_t>(std::stoul(rank_text))));
+    const auto work = drain(feeder);
+    std::cout << "INDEXED_TEMPLATE_DRAIN events=" << work.event_count
+              << " peak=" << feeder.peakTrackedEventCount()
+              << " tracked=" << feeder.trackedEventCount() << std::endl;
+    return work.child_contract_valid && feeder.trackedEventCount() == 0 &&
+           feeder.materializedEventCount() == 0;
+}
+
 }  // namespace
 
 int main() {
+    const char* definition_path = std::getenv("ASTRA_INDEXED_DEFINITION_PATH");
+    const char* invocation_path = std::getenv("ASTRA_INDEXED_INVOCATION_PATH");
+    const char* rank_text = std::getenv("ASTRA_INDEXED_RANK");
+    if (definition_path != nullptr || invocation_path != nullptr ||
+        rank_text != nullptr) {
+        if (definition_path == nullptr || invocation_path == nullptr ||
+            rank_text == nullptr) {
+            return 1;
+        }
+        return external_wire_drains(definition_path, invocation_path, rank_text)
+                   ? 0
+                   : 1;
+    }
     return dynamic_extent_preserves_events_and_sparse_state() &&
                    issue_all_ready_tracks_the_actual_dag_width() &&
                    invalid_inputs_fail_before_any_event()
