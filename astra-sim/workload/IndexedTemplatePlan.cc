@@ -444,7 +444,15 @@ bool IndexedTemplatePlan::exposeChildAfterCompletion(
     const auto* edge =
         connecting_edge(edges_, parent.recipe, child.recipe);
     require(edge != nullptr, "events are not connected");
-    return edge->relation != IndexedEdgeRelation::AllToOne ||
+    // A join is materialized once, by its last parent. That also holds when the
+    // join additionally has static parents, so a node never records a
+    // dependency on a repeated parent it cannot enumerate.
+    const auto joined = std::any_of(
+        edges_.begin(), edges_.end(), [&](const auto& item) {
+            return item.to_recipe == child.recipe &&
+                   item.relation == IndexedEdgeRelation::AllToOne;
+        });
+    return !joined ||
            completed_parent_count + 1 == requiredParentCount(child);
 }
 
