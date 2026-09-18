@@ -155,7 +155,7 @@ void Workload::report_template_metrics() const {
         indexed != nullptr
             ? format_indexed_template_metrics_line(
                   static_cast<uint32_t>(sys->id), indexed_registry_, *indexed,
-                  et_read_count_)
+                  et_read_count_, latest_parent_completion_ns_.size())
             : format_template_metrics_line(static_cast<uint32_t>(sys->id),
                                            template_registry_, et_read_count_);
     // The frontend contract is the stdout protocol line. It is written through
@@ -450,6 +450,10 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
 
 void Workload::issue_comp(shared_ptr<Chakra::ETFeederNode> node) {
     hw_resource->occupy(node);
+    // Every parent of an issuable node has completed, so its exposure baseline
+    // can never move again. Dropping it here keeps the map at the ready
+    // frontier instead of one entry per compute node of the whole iteration.
+    latest_parent_completion_ns_.erase(node->id());
     if (!node->is_cpu_op()) {
         sys->memory_movement_executor->record_compute_start(node->id());
     }

@@ -56,7 +56,8 @@ IndexedTemplatePlan IndexedTemplateRegistry::compile(
 
 std::string format_indexed_template_metrics_line(
     uint32_t rank, const IndexedTemplateRegistry& registry,
-    const IndexedTemplateWorkloadFeeder& feeder, uint64_t et_read_count) {
+    const IndexedTemplateWorkloadFeeder& feeder, uint64_t et_read_count,
+    uint64_t exposure_baselines) {
     std::ostringstream line;
     line << "TEMPLATE_V3_METRICS"
          << " rank=" << rank
@@ -67,7 +68,8 @@ std::string format_indexed_template_metrics_line(
          << " cached_definitions=" << registry.cachedDefinitionCount()
          << " tracked_events=" << feeder.trackedEventCount()
          << " peak_tracked_events=" << feeder.peakTrackedEventCount()
-         << " materialized_events=" << feeder.materializedEventCount();
+         << " materialized_events=" << feeder.materializedEventCount()
+         << " exposure_baselines=" << exposure_baselines;
     return line.str();
 }
 

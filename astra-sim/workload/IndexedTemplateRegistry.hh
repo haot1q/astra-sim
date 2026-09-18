@@ -52,7 +52,8 @@ class IndexedTemplateWorkloadFeeder;
 
 std::string format_indexed_template_metrics_line(
     uint32_t rank, const IndexedTemplateRegistry& registry,
-    const IndexedTemplateWorkloadFeeder& feeder, uint64_t et_read_count);
+    const IndexedTemplateWorkloadFeeder& feeder, uint64_t et_read_count,
+    uint64_t exposure_baselines);
 
 }  // namespace AstraSim
 
