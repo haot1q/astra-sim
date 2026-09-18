@@ -36,6 +36,7 @@ class WorkloadFeeder {
     virtual const std::string& serviceActivationId() const = 0;
     virtual std::optional<uint32_t> serviceRank() const = 0;
     virtual bool isTemplateV2() const { return false; }
+    virtual bool isTemplateV3() const { return false; }
 };
 
 class TemplateIdleWorkloadFeeder final : public WorkloadFeeder {

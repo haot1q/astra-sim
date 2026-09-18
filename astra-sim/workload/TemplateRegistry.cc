@@ -338,32 +338,9 @@ TemplateExecutionPlan compile_plan(
 
 }  // namespace
 
-bool TemplateRegistry::DefinitionFileIdentity::operator==(
-    const DefinitionFileIdentity& other) const {
-    return device == other.device && inode == other.inode &&
-           size == other.size && modified_seconds == other.modified_seconds &&
-           modified_nanoseconds == other.modified_nanoseconds;
-}
-
 std::shared_ptr<const TemplateDefinitionSet> TemplateRegistry::loadDefinition(
     const std::string& path) {
-    struct stat file_status {};
-    require(stat(path.c_str(), &file_status) == 0 &&
-                S_ISREG(file_status.st_mode),
-            "definition path must identify a readable regular file");
-#if defined(__APPLE__)
-    const auto modified_seconds = file_status.st_mtimespec.tv_sec;
-    const auto modified_nanoseconds = file_status.st_mtimespec.tv_nsec;
-#else
-    const auto modified_seconds = file_status.st_mtim.tv_sec;
-    const auto modified_nanoseconds = file_status.st_mtim.tv_nsec;
-#endif
-    const DefinitionFileIdentity file_identity{
-        static_cast<uint64_t>(file_status.st_dev),
-        static_cast<uint64_t>(file_status.st_ino),
-        static_cast<uint64_t>(file_status.st_size),
-        static_cast<int64_t>(modified_seconds),
-        static_cast<int64_t>(modified_nanoseconds)};
+    const auto file_identity = read_template_file_identity(path);
     const auto cached = definitions_.find(path);
     if (cached != definitions_.end()) {
         require(cached->second.file_identity == file_identity,

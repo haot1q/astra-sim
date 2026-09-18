@@ -16,6 +16,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CommunicatorGroup.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/workload/HardwareResource.hh"
+#include "astra-sim/workload/IndexedTemplateRegistry.hh"
 #include "astra-sim/workload/TemplateRegistry.hh"
 #include "astra-sim/workload/WorkloadFeeder.hh"
 
@@ -96,6 +97,7 @@ class Workload : public Callable {
     std::unordered_map<uint64_t, uint64_t> latest_parent_completion_ns_;
     std::unordered_map<uint64_t, std::shared_ptr<Chakra::ETFeederNode>> pending_memory_waits_;
     TemplateRegistry template_registry_;
+    IndexedTemplateRegistry indexed_registry_;
     uint64_t et_read_count_ = 0;
 };
 

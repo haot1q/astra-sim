@@ -37,6 +37,7 @@ class IndexedTemplateWorkloadFeeder final : public WorkloadFeeder {
     const std::string& serviceBindingDigest() const override;
     const std::string& serviceActivationId() const override;
     std::optional<uint32_t> serviceRank() const override;
+    bool isTemplateV3() const override { return true; }
 
     uint64_t trackedEventCount() const;
     uint64_t peakTrackedEventCount() const;

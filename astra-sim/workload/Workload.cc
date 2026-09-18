@@ -14,6 +14,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include "astra-sim/system/memory/UcieTransport.hh"
+#include "astra-sim/workload/IndexedTemplateWorkloadFeeder.hh"
 #include "astra-sim/workload/TemplateWorkloadFeeder.hh"
 #include <json/json.hpp>
 
@@ -47,7 +48,7 @@ MemoryOperation AstraSim::memory_operation_for_node_type(
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     this->sys = sys;
-    if (et_filename == "template-v2-idle") {
+    if (et_filename == "template-v2-idle" || et_filename == "template-v3-idle") {
         this->et_feeder = new TemplateIdleWorkloadFeeder();
     } else {
         string workload_filename =
@@ -107,14 +108,23 @@ unique_ptr<WorkloadFeeder> Workload::prepare_template_feeder(
     string invocation_path;
     string extra;
     if (!(input >> keyword >> definition_path >> invocation_path) ||
-        keyword != "template-v2" || (input >> extra)) {
+        (keyword != "template-v2" && keyword != "template-v3") ||
+        (input >> extra)) {
         throw invalid_argument(
-            "template-v2 command must be exactly: template-v2 "
+            "template command must be exactly: template-v2|template-v3 "
             "<definition-json-path> <invocation-json-path>");
     }
     if (access(definition_path.c_str(), R_OK) < 0 ||
         access(invocation_path.c_str(), R_OK) < 0) {
-        throw invalid_argument("template-v2 definition/invocation path is not readable");
+        throw invalid_argument(keyword +
+                               " definition/invocation path is not readable");
+    }
+    if (keyword == "template-v3") {
+        auto feeder = make_unique<IndexedTemplateWorkloadFeeder>(
+            indexed_registry_.compile(definition_path, invocation_path,
+                                      static_cast<uint32_t>(sys->id)));
+        validate_feeder(*feeder);
+        return feeder;
     }
     auto definitions = template_registry_.loadDefinition(definition_path);
     auto invocation = template_registry_.loadInvocation(
@@ -139,8 +149,15 @@ void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder) {
 }
 
 void Workload::report_template_metrics() const {
-    const string line = format_template_metrics_line(
-        static_cast<uint32_t>(sys->id), template_registry_, et_read_count_);
+    const auto* indexed =
+        dynamic_cast<const IndexedTemplateWorkloadFeeder*>(et_feeder);
+    const string line =
+        indexed != nullptr
+            ? format_indexed_template_metrics_line(
+                  static_cast<uint32_t>(sys->id), indexed_registry_, *indexed,
+                  et_read_count_)
+            : format_template_metrics_line(static_cast<uint32_t>(sys->id),
+                                           template_registry_, et_read_count_);
     // The frontend contract is the stdout protocol line. It is written through
     // the shared atomic writer so a rank's metrics are published synchronously
     // and cannot be lost in the asynchronous logger's queue. Do not duplicate
@@ -662,7 +679,7 @@ void Workload::call(EventType event, CallData* data) {
                 sys->id, iteration, Sys::boostedTick());
             ++rank_completion_count;
         }
-        if (et_feeder->isTemplateV2()) {
+        if (et_feeder->isTemplateV2() || et_feeder->isTemplateV3()) {
             report_template_metrics();
         }
         if (!pending_workloads.empty()) {
@@ -691,30 +708,32 @@ void Workload::call(EventType event, CallData* data) {
 
 void Workload::add_workload(const std::string& new_filename,
                             const std::vector<Sys*>& systems) {
-    if (new_filename.rfind("template-v2", 0) == 0) {
+    if (new_filename.rfind("template-v2", 0) == 0 ||
+        new_filename.rfind("template-v3", 0) == 0) {
+        const auto keyword = new_filename.substr(0, 11);
         vector<Workload*> targets;
         targets.reserve(systems.size() + 1);
         set<Workload*> unique_targets;
         for (auto* managed_sys : systems) {
             if (managed_sys == nullptr || managed_sys->workload == nullptr) {
-                throw invalid_argument(
-                    "null system or workload while adding template-v2 workload");
+                throw invalid_argument("null system or workload while adding " +
+                                       keyword + " workload");
             }
             if (!unique_targets.insert(managed_sys->workload).second) {
-                throw invalid_argument(
-                    "duplicate managed workload in template-v2 command");
+                throw invalid_argument("duplicate managed workload in " +
+                                       keyword + " command");
             }
             targets.push_back(managed_sys->workload);
         }
         if (!unique_targets.insert(this).second) {
             throw invalid_argument(
-                "template-v2 managed workloads include the controller workload");
+                keyword + " managed workloads include the controller workload");
         }
         targets.push_back(this);
         for (const auto* workload : targets) {
             if (!workload->is_finished || !workload->pending_workloads.empty()) {
-                throw invalid_argument(
-                    "template-v2 invocation pipelining is not supported");
+                throw invalid_argument(keyword +
+                                       " invocation pipelining is not supported");
             }
         }
         vector<unique_ptr<WorkloadFeeder>> prepared;

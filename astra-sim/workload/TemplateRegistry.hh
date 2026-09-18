@@ -12,6 +12,7 @@ LICENSE file in the root directory of this source tree.
 #include <unordered_map>
 #include <vector>
 
+#include "astra-sim/workload/TemplateFileIdentity.hh"
 #include "extern/helper/json/json.hpp"
 
 namespace AstraSim {
@@ -103,17 +104,8 @@ class TemplateRegistry {
     void releaseMaterializedLeaf();
 
   private:
-    struct DefinitionFileIdentity {
-        uint64_t device;
-        uint64_t inode;
-        uint64_t size;
-        int64_t modified_seconds;
-        int64_t modified_nanoseconds;
-
-        bool operator==(const DefinitionFileIdentity& other) const;
-    };
     struct CachedDefinition {
-        DefinitionFileIdentity file_identity;
+        TemplateFileIdentity file_identity;
         std::shared_ptr<const TemplateDefinitionSet> definition;
     };
 
