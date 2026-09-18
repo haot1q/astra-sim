@@ -21,6 +21,7 @@ uint64_t checkedIndexedMultiply(
     uint64_t left, uint64_t right, const std::string& operation);
 using IndexedVectorBindings =
     std::unordered_map<std::string, std::vector<uint64_t>>;
+using IndexedIndices = std::unordered_map<std::string, uint64_t>;
 
 nlohmann::json evaluateIndexedExpression(
     const nlohmann::json& expression,
@@ -31,6 +32,11 @@ nlohmann::json evaluateIndexedExpression(
     const std::unordered_map<std::string, uint64_t>& bindings,
     const IndexedVectorBindings& vectors,
     uint64_t index);
+nlohmann::json evaluateIndexedExpression(
+    const nlohmann::json& expression,
+    const std::unordered_map<std::string, uint64_t>& bindings,
+    const IndexedVectorBindings& vectors,
+    const IndexedIndices& indices);
 
 }  // namespace AstraSim
 

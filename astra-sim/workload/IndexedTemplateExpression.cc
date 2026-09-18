@@ -47,7 +47,8 @@ Json evaluateIndexedExpression(
     const std::unordered_map<std::string, uint64_t>& bindings,
     uint64_t index) {
     static const IndexedVectorBindings none;
-    return evaluateIndexedExpression(expression, bindings, none, index);
+    return evaluateIndexedExpression(
+        expression, bindings, none, IndexedIndices{{"", index}});
 }
 
 Json evaluateIndexedExpression(
@@ -55,6 +56,15 @@ Json evaluateIndexedExpression(
     const std::unordered_map<std::string, uint64_t>& bindings,
     const IndexedVectorBindings& vectors,
     uint64_t index) {
+    return evaluateIndexedExpression(
+        expression, bindings, vectors, IndexedIndices{{"", index}});
+}
+
+Json evaluateIndexedExpression(
+    const Json& expression,
+    const std::unordered_map<std::string, uint64_t>& bindings,
+    const IndexedVectorBindings& vectors,
+    const IndexedIndices& indices) {
     if (!expression.is_object()) return expression;
     require(expression.size() == 1,
             "expression must contain one operation");
@@ -68,9 +78,17 @@ Json evaluateIndexedExpression(
         return found->second;
     }
     if (operation == "index") {
-        require(item.is_boolean() && item.get<bool>(),
-                "index expression must be true");
-        return index;
+        if (item.is_boolean()) {
+            require(item.get<bool>() && indices.size() == 1,
+                    "unqualified index requires one domain axis");
+            return indices.begin()->second;
+        }
+        require(item.is_string() && !item.get<std::string>().empty(),
+                "named index requires a domain axis");
+        const auto found = indices.find(item.get<std::string>());
+        require(found != indices.end(),
+                "expression references unknown domain axis");
+        return found->second;
     }
     require(item.is_array() && item.size() == 2,
             operation + " expression requires two arguments");
@@ -83,17 +101,17 @@ Json evaluateIndexedExpression(
         require(found != vectors.end(),
                 "expression references unknown vector");
         const auto position = unsigned_value(
-            evaluateIndexedExpression(item.at(1), bindings, vectors, index),
+            evaluateIndexedExpression(item.at(1), bindings, vectors, indices),
             operation);
         require(position < found->second.size(),
                 "vector_at position is outside the bound vector");
         return found->second.at(static_cast<std::size_t>(position));
     }
     const auto left = unsigned_value(
-        evaluateIndexedExpression(item.at(0), bindings, vectors, index),
+        evaluateIndexedExpression(item.at(0), bindings, vectors, indices),
         operation);
     const auto right = unsigned_value(
-        evaluateIndexedExpression(item.at(1), bindings, vectors, index),
+        evaluateIndexedExpression(item.at(1), bindings, vectors, indices),
         operation);
     if (operation == "add") {
         return checkedIndexedAdd(left, right, operation);

@@ -19,8 +19,16 @@ namespace AstraSim {
 
 enum class IndexedEdgeRelation {
     SameIndex,
+    SameOuter,
     AllToOne,
+    OneToAll,
     OneToOne,
+};
+
+struct IndexedTemplateDomain {
+    std::vector<std::string> axes;
+    std::vector<uint64_t> extents;
+    uint64_t count;
 };
 
 struct IndexedTemplateRecipe {
@@ -30,6 +38,8 @@ struct IndexedTemplateRecipe {
     uint64_t base_id;
     uint64_t count;
     uint64_t stride;
+    std::vector<std::string> axes;
+    std::vector<uint64_t> extents;
     std::unordered_map<std::string, nlohmann::json> attributes;
 };
 
@@ -43,6 +53,7 @@ struct IndexedTemplateEvent {
     uint64_t id;
     std::size_t recipe;
     uint64_t index;
+    IndexedIndices indices;
 };
 
 class IndexedTemplatePlan {
@@ -85,11 +96,11 @@ class IndexedTemplatePlan {
     void loadBindings(
         const nlohmann::json& definition,
         const nlohmann::json& rank);
-    std::unordered_map<std::string, uint64_t> loadDomains(
+    std::unordered_map<std::string, IndexedTemplateDomain> loadDomains(
         const nlohmann::json& definition) const;
     void loadRecipes(
         const nlohmann::json& definition,
-        const std::unordered_map<std::string, uint64_t>& domains);
+        const std::unordered_map<std::string, IndexedTemplateDomain>& domains);
     void assignEventIds();
     void loadEdges(const nlohmann::json& definition);
     void validateGraph() const;

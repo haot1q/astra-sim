@@ -101,6 +101,7 @@ IndexedTemplateWorkloadFeeder::IndexedTemplateWorkloadFeeder(
                    std::numeric_limits<uint64_t>::max()) {
     require(unfinished_event_count_ > 0, "plan must contain events");
     for (std::size_t recipe = 0; recipe < plan_.recipes().size(); ++recipe) {
+        if (plan_.recipes().at(recipe).count == 0) continue;
         if (plan_.requiredParentCount(
                 plan_.event(plan_.eventId(recipe, 0))) == 0) {
             activateRoot(recipe);

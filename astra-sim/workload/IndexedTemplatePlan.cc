@@ -57,7 +57,9 @@ uint64_t unsigned_value(const Json& value, const std::string& field) {
 IndexedEdgeRelation relation(const Json& value) {
     const auto name = text(value, "edge.relation");
     if (name == "same_index") return IndexedEdgeRelation::SameIndex;
+    if (name == "same_outer") return IndexedEdgeRelation::SameOuter;
     if (name == "all_to_one") return IndexedEdgeRelation::AllToOne;
+    if (name == "one_to_all") return IndexedEdgeRelation::OneToAll;
     if (name == "one_to_one") return IndexedEdgeRelation::OneToOne;
     throw std::invalid_argument(
         "template-v3: unsupported edge relation " + name);
@@ -89,6 +91,20 @@ const IndexedTemplateEdge* connecting_edge(
             return edge.from_recipe == from && edge.to_recipe == to;
         });
     return found == edges.end() ? nullptr : &*found;
+}
+
+IndexedIndices recipe_indices(
+    const IndexedTemplateRecipe& recipe, uint64_t flat_index) {
+    require(flat_index < recipe.count, "event index exceeds recipe domain");
+    IndexedIndices result;
+    uint64_t stride = recipe.count;
+    for (std::size_t axis = 0; axis < recipe.axes.size(); ++axis) {
+        stride /= recipe.extents.at(axis);
+        result.emplace(
+            recipe.axes.at(axis),
+            (flat_index / stride) % recipe.extents.at(axis));
+    }
+    return result;
 }
 
 }  // namespace
@@ -197,19 +213,51 @@ void IndexedTemplatePlan::loadBindings(
             "rank bindings do not exactly match ports");
 }
 
-std::unordered_map<std::string, uint64_t>
+std::unordered_map<std::string, IndexedTemplateDomain>
 IndexedTemplatePlan::loadDomains(const Json& definition) const {
     require(definition.at("domains").is_array(),
             "domains must be an array");
-    std::unordered_map<std::string, uint64_t> result;
+    std::unordered_map<std::string, IndexedTemplateDomain> result;
     for (const auto& domain : definition.at("domains")) {
-        fields(domain, {"id", "extent"}, "domain");
+        require(domain.is_object() && domain.size() == 2 &&
+                    domain.contains("id") &&
+                    (domain.contains("extent") != domain.contains("axes")),
+                "domain requires exactly one extent or axes declaration");
         const auto id = identifier(domain.at("id"), "domain.id");
-        const auto extent = evaluateIndexedExpression(
-            domain.at("extent"), bindings_, vectors_, 0);
-        require(extent.is_number_unsigned() && extent.get<uint64_t>() > 0,
-                "domain extent must be positive uint64");
-        require(result.emplace(id, extent.get<uint64_t>()).second,
+        IndexedTemplateDomain loaded;
+        loaded.count = 1;
+        if (domain.contains("extent")) {
+            loaded.axes.push_back(id);
+            const auto extent = evaluateIndexedExpression(
+                domain.at("extent"), bindings_, vectors_, IndexedIndices{});
+            require(extent.is_number_unsigned(),
+                    "domain extent must be uint64");
+            loaded.extents.push_back(extent.get<uint64_t>());
+            loaded.count = extent.get<uint64_t>();
+        } else {
+            require(domain.at("axes").is_array() &&
+                        !domain.at("axes").empty() &&
+                        domain.at("axes").size() <= 2,
+                    "domain axes must contain one or two entries");
+            std::set<std::string> axes;
+            for (const auto& axis : domain.at("axes")) {
+                fields(axis, {"id", "extent"}, "domain axis");
+                const auto axis_id =
+                    identifier(axis.at("id"), "domain axis.id");
+                require(axes.insert(axis_id).second,
+                        "domain axes must be unique");
+                const auto extent = evaluateIndexedExpression(
+                    axis.at("extent"), bindings_, vectors_, IndexedIndices{});
+                require(extent.is_number_unsigned(),
+                        "domain extent must be uint64");
+                loaded.axes.push_back(axis_id);
+                loaded.extents.push_back(extent.get<uint64_t>());
+                loaded.count = checkedIndexedMultiply(
+                    loaded.count, extent.get<uint64_t>(),
+                    "domain event count");
+            }
+        }
+        require(result.emplace(id, std::move(loaded)).second,
                 "duplicate domain");
     }
     return result;
@@ -217,7 +265,7 @@ IndexedTemplatePlan::loadDomains(const Json& definition) const {
 
 void IndexedTemplatePlan::loadRecipes(
     const Json& definition,
-    const std::unordered_map<std::string, uint64_t>& domains) {
+    const std::unordered_map<std::string, IndexedTemplateDomain>& domains) {
     require(definition.at("recipes").is_array() &&
                 !definition.at("recipes").empty(),
             "recipes must be a nonempty array");
@@ -234,7 +282,10 @@ void IndexedTemplatePlan::loadRecipes(
             recipe.domain = identifier(raw.at("domain"), "recipe.domain");
             require(domains.count(*recipe.domain) != 0,
                     "recipe references unknown domain");
-            recipe.count = domains.at(*recipe.domain);
+            const auto& domain = domains.at(*recipe.domain);
+            recipe.count = domain.count;
+            recipe.axes = domain.axes;
+            recipe.extents = domain.extents;
         } else {
             recipe.count = 1;
         }
@@ -252,9 +303,12 @@ void IndexedTemplatePlan::loadRecipes(
         }
         for (const auto& [name, value] : recipe.attributes) {
             (void)name;
-            evaluateIndexedExpression(value, bindings_, vectors_, 0);
+            if (recipe.count == 0) continue;
             evaluateIndexedExpression(
-                value, bindings_, vectors_, recipe.count - 1);
+                value, bindings_, vectors_, recipe_indices(recipe, 0));
+            evaluateIndexedExpression(
+                value, bindings_, vectors_,
+                recipe_indices(recipe, recipe.count - 1));
         }
         recipes_.push_back(std::move(recipe));
     }
@@ -320,10 +374,24 @@ void IndexedTemplatePlan::loadEdges(const Json& definition) {
                         source.domain == destination.domain &&
                         source.count == destination.count,
                     "same_index requires one matching domain");
+        } else if (edge_relation == IndexedEdgeRelation::SameOuter) {
+            require(source.domain.has_value() &&
+                        destination.domain.has_value() &&
+                        !source.axes.empty() &&
+                        !destination.axes.empty() &&
+                        source.axes.front() == destination.axes.front() &&
+                        source.extents.front() ==
+                            destination.extents.front(),
+                    "same_outer requires repeated domains with one common "
+                    "outer axis");
         } else if (edge_relation == IndexedEdgeRelation::AllToOne) {
             require(source.domain.has_value() &&
                         !destination.domain.has_value(),
                     "all_to_one requires repeated source and static target");
+        } else if (edge_relation == IndexedEdgeRelation::OneToAll) {
+            require(!source.domain.has_value() &&
+                        destination.domain.has_value(),
+                    "one_to_all requires static source and repeated target");
         } else {
             require(!source.domain.has_value() &&
                         !destination.domain.has_value(),
@@ -362,8 +430,8 @@ IndexedTemplateEvent IndexedTemplatePlan::event(uint64_t event_id) const {
     require(found != recipes_.end(), "event id does not map to a recipe");
     const auto recipe =
         static_cast<std::size_t>(std::distance(recipes_.begin(), found));
-    return {event_id, recipe,
-            (event_id - found->base_id) / found->stride};
+    const auto index = (event_id - found->base_id) / found->stride;
+    return {event_id, recipe, index, recipe_indices(*found, index)};
 }
 
 uint64_t IndexedTemplatePlan::eventId(
@@ -381,7 +449,7 @@ Json IndexedTemplatePlan::attributes(
     Json result = Json::object();
     for (const auto& [name, value] : recipes_.at(event.recipe).attributes) {
         result[name] = evaluateIndexedExpression(
-            value, bindings_, vectors_, event.index);
+            value, bindings_, vectors_, event.indices);
     }
     return result;
 }
@@ -391,6 +459,25 @@ std::vector<IndexedTemplateEvent> IndexedTemplatePlan::children(
     std::vector<IndexedTemplateEvent> result;
     for (const auto& edge : edges_) {
         if (edge.from_recipe != event.recipe) continue;
+        if (edge.relation == IndexedEdgeRelation::SameOuter) {
+            const auto& source = recipes_.at(edge.from_recipe);
+            const auto& target = recipes_.at(edge.to_recipe);
+            const auto outer = event.indices.at(source.axes.front());
+            const auto inner = target.count / target.extents.front();
+            for (uint64_t offset = 0; offset < inner; ++offset) {
+                result.push_back(this->event(
+                    eventId(edge.to_recipe, outer * inner + offset)));
+            }
+            continue;
+        }
+        if (edge.relation == IndexedEdgeRelation::OneToAll) {
+            const auto count = recipes_.at(edge.to_recipe).count;
+            for (uint64_t index = 0; index < count; ++index) {
+                result.push_back(
+                    this->event(eventId(edge.to_recipe, index)));
+            }
+            continue;
+        }
         const uint64_t index =
             edge.relation == IndexedEdgeRelation::SameIndex ? event.index : 0;
         result.push_back(this->event(eventId(edge.to_recipe, index)));
@@ -403,7 +490,8 @@ std::vector<uint64_t> IndexedTemplatePlan::fixedParentIds(
     std::vector<uint64_t> result;
     for (const auto& edge : edges_) {
         if (edge.to_recipe != event.recipe ||
-            edge.relation == IndexedEdgeRelation::AllToOne) {
+            edge.relation == IndexedEdgeRelation::AllToOne ||
+            edge.relation == IndexedEdgeRelation::SameOuter) {
             continue;
         }
         const uint64_t index =
@@ -422,6 +510,9 @@ uint64_t IndexedTemplatePlan::requiredParentCount(
             result,
             edge.relation == IndexedEdgeRelation::AllToOne
                 ? recipes_.at(edge.from_recipe).count
+                : edge.relation == IndexedEdgeRelation::SameOuter
+                ? recipes_.at(edge.from_recipe).count /
+                      recipes_.at(edge.from_recipe).extents.front()
                 : 1,
             "parent count");
     }
@@ -434,7 +525,8 @@ bool IndexedTemplatePlan::isAllToOne(
     const auto* edge =
         connecting_edge(edges_, parent.recipe, child.recipe);
     require(edge != nullptr, "events are not connected");
-    return edge->relation == IndexedEdgeRelation::AllToOne;
+    return edge->relation == IndexedEdgeRelation::AllToOne ||
+           edge->relation == IndexedEdgeRelation::SameOuter;
 }
 
 bool IndexedTemplatePlan::exposeChildAfterCompletion(
@@ -450,7 +542,8 @@ bool IndexedTemplatePlan::exposeChildAfterCompletion(
     const auto joined = std::any_of(
         edges_.begin(), edges_.end(), [&](const auto& item) {
             return item.to_recipe == child.recipe &&
-                   item.relation == IndexedEdgeRelation::AllToOne;
+                   (item.relation == IndexedEdgeRelation::AllToOne ||
+                    item.relation == IndexedEdgeRelation::SameOuter);
         });
     return !joined ||
            completed_parent_count + 1 == requiredParentCount(child);

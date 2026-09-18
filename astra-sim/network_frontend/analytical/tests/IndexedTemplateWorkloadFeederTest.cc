@@ -420,6 +420,88 @@ bool bound_vectors_supply_per_entry_residency() {
     return true;
 }
 
+Json two_axis_definition() {
+    Json result = {
+        {"schema_version", "template-definition-v3-proof"},
+        {"template_id", "two-axis-proof"},
+        {"definition_digest", ""},
+        {"tier_manifest_digest", "sha256:tier"},
+        {"service_binding_digest", "sha256:service"},
+        {"service_activation_id", "activation"},
+        {"ports", Json::array({
+             Json{{"name", "tokens"}, {"type", "uint64"}}})},
+        {"domains", Json::array({
+             Json{{"id", "ring"},
+                  {"axes", Json::array({
+                       Json{{"id", "token"},
+                            {"extent", expression("param", "tokens")}},
+                       Json{{"id", "column"}, {"extent", 3U}}})}}})},
+        {"recipes", Json::array({
+             Json{{"id", "scale"},
+                  {"kind", "memory_load"},
+                  {"domain", "ring"},
+                  {"attrs",
+                   {{"tensor_size",
+                     expression(
+                         "add",
+                         Json::array({
+                             1U,
+                             expression(
+                                 "add",
+                                 Json::array({
+                                     expression(
+                                         "mul",
+                                         Json::array({
+                                             expression("index", "token"),
+                                             10U})),
+                                     expression("index", "column")}))}))},
+                    {"tensor_loc", 16U},
+                    {"tensor_device", 0U},
+                    {"tensor_channel", 0U}}}},
+             Json{{"id", "compute"},
+                  {"kind", "compute"},
+                  {"domain", nullptr},
+                  {"attrs",
+                   {{"duration_ns", 1U},
+                    {"num_ops", expression("param", "tokens")},
+                    {"tensor_size", 1U},
+                    {"is_cpu_op", false}}}}})},
+        {"edges", Json::array({
+             Json{{"from", "scale"},
+                  {"to", "compute"},
+                  {"relation", "all_to_one"}}})},
+    };
+    result["definition_digest"] = IndexedTemplatePlan::definitionDigest(result);
+    return result;
+}
+
+bool two_axis_domain_preserves_tuple_indices() {
+    const auto raw_definition = two_axis_definition();
+    const Json invocation = {
+        {"schema_version", "template-invocation-v3-proof"},
+        {"definition_id", raw_definition.at("template_id")},
+        {"definition_digest", raw_definition.at("definition_digest")},
+        {"ranks", Json::array({
+             Json{{"rank", 0U}, {"bindings", {{"tokens", 2U}}}}})},
+    };
+    auto plan = IndexedTemplatePlan::compile(
+        raw_definition, invocation, 0);
+    if (plan.eventCount() != 7) return false;
+    const std::vector<uint64_t> expected = {1U, 2U, 3U, 11U, 12U, 13U};
+    for (uint64_t flat = 0; flat < expected.size(); ++flat) {
+        const auto event = plan.event(plan.eventId(0, flat));
+        if (event.indices.at("token") != flat / 3 ||
+            event.indices.at("column") != flat % 3 ||
+            plan.attributes(event).at("tensor_size") != expected.at(flat)) {
+            return false;
+        }
+    }
+    IndexedTemplateWorkloadFeeder feeder(std::move(plan));
+    const auto work = drain(feeder);
+    return work.event_count == 7 && work.memory_bytes == expected &&
+           work.child_contract_valid && feeder.trackedEventCount() == 0;
+}
+
 bool invalid_inputs_fail_before_any_event() {
     const auto raw_definition = definition();
     auto production_schema = raw_definition;
@@ -457,6 +539,7 @@ bool invalid_inputs_fail_before_any_event() {
     try {
         IndexedTemplateWorkloadFeeder feeder(
             IndexedTemplatePlan::compile(raw_definition, zero, 0));
+        drain(feeder);
         return false;
     } catch (const std::invalid_argument&) {
     }
@@ -464,6 +547,23 @@ bool invalid_inputs_fail_before_any_event() {
         raw_definition, std::numeric_limits<uint64_t>::max(), 4U);
     try {
         IndexedTemplatePlan::compile(raw_definition, overflow, 0);
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    auto too_deep = two_axis_definition();
+    too_deep["domains"][0]["axes"].push_back(
+        Json{{"id", "forbidden"}, {"extent", 2U}});
+    too_deep["definition_digest"] =
+        IndexedTemplatePlan::definitionDigest(too_deep);
+    try {
+        IndexedTemplatePlan::compile(
+            too_deep,
+            {{"schema_version", "template-invocation-v3-proof"},
+             {"definition_id", too_deep.at("template_id")},
+             {"definition_digest", too_deep.at("definition_digest")},
+             {"ranks", Json::array({
+                  Json{{"rank", 0U}, {"bindings", {{"tokens", 2U}}}}})}},
+            0);
         return false;
     } catch (const std::invalid_argument&) {
     }
@@ -516,6 +616,7 @@ int main() {
     return dynamic_extent_preserves_events_and_sparse_state() &&
                    issue_all_ready_tracks_the_actual_dag_width() &&
                    bound_vectors_supply_per_entry_residency() &&
+                   two_axis_domain_preserves_tuple_indices() &&
                    invalid_inputs_fail_before_any_event()
                ? 0
                : 1;
