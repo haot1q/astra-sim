@@ -382,6 +382,7 @@ void IndexedTemplatePlan::loadEdges(const Json& definition) {
                         source.axes.front() == destination.axes.front() &&
                         (source.extents.front() ==
                              destination.extents.front() ||
+                         source.count == 0 ||
                          destination.count == 0),
                     "same_outer requires repeated domains with one common "
                     "outer axis");
@@ -513,8 +514,10 @@ uint64_t IndexedTemplatePlan::requiredParentCount(
             edge.relation == IndexedEdgeRelation::AllToOne
                 ? recipes_.at(edge.from_recipe).count
                 : edge.relation == IndexedEdgeRelation::SameOuter
-                ? recipes_.at(edge.from_recipe).count /
-                      recipes_.at(edge.from_recipe).extents.front()
+                ? (recipes_.at(edge.from_recipe).count == 0
+                       ? 0
+                       : recipes_.at(edge.from_recipe).count /
+                             recipes_.at(edge.from_recipe).extents.front())
                 : 1,
             "parent count");
     }
