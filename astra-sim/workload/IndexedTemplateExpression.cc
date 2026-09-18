@@ -46,6 +46,15 @@ Json evaluateIndexedExpression(
     const Json& expression,
     const std::unordered_map<std::string, uint64_t>& bindings,
     uint64_t index) {
+    static const IndexedVectorBindings none;
+    return evaluateIndexedExpression(expression, bindings, none, index);
+}
+
+Json evaluateIndexedExpression(
+    const Json& expression,
+    const std::unordered_map<std::string, uint64_t>& bindings,
+    const IndexedVectorBindings& vectors,
+    uint64_t index) {
     if (!expression.is_object()) return expression;
     require(expression.size() == 1,
             "expression must contain one operation");
@@ -65,10 +74,27 @@ Json evaluateIndexedExpression(
     }
     require(item.is_array() && item.size() == 2,
             operation + " expression requires two arguments");
+    if (operation == "vector_at") {
+        // The producer binds one irregular address table per rank; a lookup
+        // never invents an entry the invocation did not declare.
+        require(item.at(0).is_string(),
+                "vector_at requires a bound vector name");
+        const auto found = vectors.find(item.at(0).get<std::string>());
+        require(found != vectors.end(),
+                "expression references unknown vector");
+        const auto position = unsigned_value(
+            evaluateIndexedExpression(item.at(1), bindings, vectors, index),
+            operation);
+        require(position < found->second.size(),
+                "vector_at position is outside the bound vector");
+        return found->second.at(static_cast<std::size_t>(position));
+    }
     const auto left = unsigned_value(
-        evaluateIndexedExpression(item.at(0), bindings, index), operation);
+        evaluateIndexedExpression(item.at(0), bindings, vectors, index),
+        operation);
     const auto right = unsigned_value(
-        evaluateIndexedExpression(item.at(1), bindings, index), operation);
+        evaluateIndexedExpression(item.at(1), bindings, vectors, index),
+        operation);
     if (operation == "add") {
         return checkedIndexedAdd(left, right, operation);
     }

@@ -342,6 +342,84 @@ bool issue_all_ready_tracks_the_actual_dag_width() {
            feeder.peakTrackedEventCount() == issued;
 }
 
+Json residency_definition() {
+    Json result = {
+        {"schema_version", "template-definition-v3-proof"},
+        {"template_id", "residency-proof"},
+        {"definition_digest", ""},
+        {"tier_manifest_digest", "sha256:tier"},
+        {"service_binding_digest", "sha256:service"},
+        {"service_activation_id", "activation"},
+        {"ports", Json::array({
+             Json{{"name", "entries"}, {"type", "uint64"}},
+             Json{{"name", "entry_tier"}, {"type", "uint64_vector"}}})},
+        {"domains", Json::array({
+             Json{{"id", "slots"}, {"extent", expression("param", "entries")}}})},
+        {"recipes", Json::array({
+             Json{{"id", "payload"},
+                  {"kind", "memory_load"},
+                  {"domain", "slots"},
+                  {"attrs",
+                   {{"tensor_size", 576U},
+                    {"tensor_loc",
+                     expression("vector_at",
+                                Json::array({"entry_tier",
+                                             expression("index", true)}))},
+                    {"tensor_device", 0U},
+                    {"tensor_channel", 0U}}}}})},
+        {"edges", Json::array()},
+    };
+    result["definition_digest"] = IndexedTemplatePlan::definitionDigest(result);
+    return result;
+}
+
+Json residency_invocation(const Json& definition, Json tiers, uint64_t entries) {
+    return {
+        {"schema_version", "template-invocation-v3-proof"},
+        {"definition_id", definition.at("template_id")},
+        {"definition_digest", definition.at("definition_digest")},
+        {"ranks", Json::array({
+             Json{{"rank", 0U},
+                  {"bindings",
+                   {{"entries", entries}, {"entry_tier", std::move(tiers)}}}}})},
+    };
+}
+
+// A bound address table lets one selected slot stay cold while its neighbour
+// stays hot; a template-wide constant location cannot express that.
+bool bound_vectors_supply_per_entry_residency() {
+    const auto raw_definition = residency_definition();
+    const Json tiers = Json::array({16U, 17U, 16U});
+    const auto plan = IndexedTemplatePlan::compile(
+        raw_definition, residency_invocation(raw_definition, tiers, 3U), 0);
+    if (plan.eventCount() != 3) return false;
+    for (uint64_t index = 0; index < 3; ++index) {
+        const auto attributes = plan.attributes(plan.event(index + 1));
+        if (attributes.at("tensor_loc") != tiers.at(index)) return false;
+    }
+
+    try {
+        IndexedTemplatePlan::compile(
+            raw_definition, residency_invocation(raw_definition, tiers, 4U), 0);
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    try {
+        IndexedTemplatePlan::compile(
+            raw_definition,
+            residency_invocation(raw_definition, Json::array(), 1U), 0);
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    try {
+        IndexedTemplatePlan::compile(
+            raw_definition, residency_invocation(raw_definition, 16U, 1U), 0);
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    return true;
+}
+
 bool invalid_inputs_fail_before_any_event() {
     const auto raw_definition = definition();
     auto production_schema = raw_definition;
@@ -437,6 +515,7 @@ int main() {
     }
     return dynamic_extent_preserves_events_and_sparse_state() &&
                    issue_all_ready_tracks_the_actual_dag_width() &&
+                   bound_vectors_supply_per_entry_residency() &&
                    invalid_inputs_fail_before_any_event()
                ? 0
                : 1;

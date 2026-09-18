@@ -12,6 +12,7 @@ LICENSE file in the root directory of this source tree.
 #include <unordered_map>
 #include <vector>
 
+#include "astra-sim/workload/IndexedTemplateExpression.hh"
 #include "extern/helper/json/json.hpp"
 
 namespace AstraSim {
@@ -96,6 +97,7 @@ class IndexedTemplatePlan {
     std::vector<IndexedTemplateRecipe> recipes_;
     std::vector<IndexedTemplateEdge> edges_;
     std::unordered_map<std::string, uint64_t> bindings_;
+    IndexedVectorBindings vectors_;
     uint64_t event_count_ = 0;
     uint32_t rank_ = 0;
     std::string tier_manifest_digest_;

@@ -173,14 +173,25 @@ void IndexedTemplatePlan::loadBindings(
     for (const auto& port : definition.at("ports")) {
         fields(port, {"name", "type"}, "port");
         const auto name = identifier(port.at("name"), "port.name");
-        require(port.at("type") == "uint64",
-                "prototype ports must be uint64");
+        const auto type = text(port.at("type"), "port.type");
+        require(type == "uint64" || type == "uint64_vector",
+                "prototype ports must be uint64 or uint64_vector");
         require(ports.insert(name).second, "duplicate port");
         require(rank.at("bindings").contains(name),
                 "rank binding is missing port " + name);
-        bindings_.emplace(
-            name, unsigned_value(rank.at("bindings").at(name),
-                                 "binding " + name));
+        const auto& bound = rank.at("bindings").at(name);
+        if (type == "uint64") {
+            bindings_.emplace(name, unsigned_value(bound, "binding " + name));
+            continue;
+        }
+        require(bound.is_array() && !bound.empty(),
+                "vector binding " + name + " must be a nonempty array");
+        std::vector<uint64_t> values;
+        values.reserve(bound.size());
+        for (const auto& entry : bound) {
+            values.push_back(unsigned_value(entry, "binding " + name));
+        }
+        vectors_.emplace(name, std::move(values));
     }
     require(rank.at("bindings").size() == ports.size(),
             "rank bindings do not exactly match ports");
@@ -195,7 +206,7 @@ IndexedTemplatePlan::loadDomains(const Json& definition) const {
         fields(domain, {"id", "extent"}, "domain");
         const auto id = identifier(domain.at("id"), "domain.id");
         const auto extent = evaluateIndexedExpression(
-            domain.at("extent"), bindings_, 0);
+            domain.at("extent"), bindings_, vectors_, 0);
         require(extent.is_number_unsigned() && extent.get<uint64_t>() > 0,
                 "domain extent must be positive uint64");
         require(result.emplace(id, extent.get<uint64_t>()).second,
@@ -241,8 +252,9 @@ void IndexedTemplatePlan::loadRecipes(
         }
         for (const auto& [name, value] : recipe.attributes) {
             (void)name;
-            evaluateIndexedExpression(value, bindings_, 0);
-            evaluateIndexedExpression(value, bindings_, recipe.count - 1);
+            evaluateIndexedExpression(value, bindings_, vectors_, 0);
+            evaluateIndexedExpression(
+                value, bindings_, vectors_, recipe.count - 1);
         }
         recipes_.push_back(std::move(recipe));
     }
@@ -368,8 +380,8 @@ Json IndexedTemplatePlan::attributes(
     const IndexedTemplateEvent& event) const {
     Json result = Json::object();
     for (const auto& [name, value] : recipes_.at(event.recipe).attributes) {
-        result[name] =
-            evaluateIndexedExpression(value, bindings_, event.index);
+        result[name] = evaluateIndexedExpression(
+            value, bindings_, vectors_, event.index);
     }
     return result;
 }
