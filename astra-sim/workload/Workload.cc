@@ -379,6 +379,13 @@ void Workload::record_parent_completion(
     const shared_ptr<Chakra::ETFeederNode>& node) {
     const uint64_t completion_ns = static_cast<uint64_t>(Sys::boostedTick());
     for (const auto& child : et_feeder->childNodes(node->id())) {
+        // Only device compute consumers read this baseline (see
+        // movement_exposed_to_dependent_ns), and only issue_comp retires it.
+        // Recording it for memory or communication children would leave one
+        // entry per such node behind after the iteration drained.
+        if (child->type() != ChakraNodeType::COMP_NODE || child->is_cpu_op()) {
+            continue;
+        }
         auto& latest = latest_parent_completion_ns_[child->id()];
         latest = max(latest, completion_ns);
     }

@@ -42,6 +42,7 @@ class IndexedTemplateProgramFeeder final : public WorkloadFeeder {
     uint64_t completedCallCount() const { return completed_call_count_; }
 
   private:
+    void requireDisjointEventIds() const;
     bool advance();
     IndexedTemplateWorkloadFeeder& current();
     const IndexedTemplateWorkloadFeeder& current() const;

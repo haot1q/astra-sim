@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/workload/IndexedTemplateProgramFeeder.hh"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -37,7 +38,27 @@ IndexedTemplateProgramFeeder::IndexedTemplateProgramFeeder(
             "program calls require one rank and service identity");
         require(plan.eventCount() != 0, "program call must emit events");
     }
+    requireDisjointEventIds();
     advance();
+}
+
+void IndexedTemplateProgramFeeder::requireDisjointEventIds() const {
+    // The registry offsets each call; a plan whose IDs overlap a sibling's
+    // would let one Workload completion retire the wrong call's event.
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    ranges.reserve(plans_.size());
+    for (const auto& plan : plans_) {
+        const auto first = plan.firstEventId();
+        require(plan.eventCount() <=
+                    std::numeric_limits<uint64_t>::max() - first,
+                "program event ids overflow");
+        ranges.emplace_back(first, first + plan.eventCount());
+    }
+    std::sort(ranges.begin(), ranges.end());
+    for (std::size_t index = 1; index < ranges.size(); ++index) {
+        require(ranges.at(index - 1).second <= ranges.at(index).first,
+                "program calls must not share event ids");
+    }
 }
 
 bool IndexedTemplateProgramFeeder::advance() {

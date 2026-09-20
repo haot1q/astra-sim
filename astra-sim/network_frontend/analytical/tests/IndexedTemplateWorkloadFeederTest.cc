@@ -611,6 +611,18 @@ bool invalid_inputs_fail_before_any_event() {
         return false;
     } catch (const std::invalid_argument&) {
     }
+    // Two compiled calls that were never offset share event ids 1..N; the
+    // program feeder must refuse them instead of retiring the wrong call.
+    std::vector<IndexedTemplatePlan> overlapping;
+    overlapping.push_back(IndexedTemplatePlan::compile(
+        raw_definition, invocation(raw_definition, 5U, 4U), 0));
+    overlapping.push_back(IndexedTemplatePlan::compile(
+        raw_definition, invocation(raw_definition, 5U, 4U), 0));
+    try {
+        IndexedTemplateProgramFeeder feeder(std::move(overlapping));
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
     return true;
 }
 

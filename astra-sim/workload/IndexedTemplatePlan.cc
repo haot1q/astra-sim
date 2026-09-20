@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/workload/IndexedTemplatePlan.hh"
 
 #include <algorithm>
+#include <limits>
 #include <functional>
 #include <regex>
 #include <set>
@@ -584,6 +585,13 @@ const std::vector<IndexedTemplateEdge>& IndexedTemplatePlan::edges() const {
     return edges_;
 }
 uint64_t IndexedTemplatePlan::eventCount() const { return event_count_; }
+uint64_t IndexedTemplatePlan::firstEventId() const {
+    uint64_t first = std::numeric_limits<uint64_t>::max();
+    for (const auto& recipe : recipes_) {
+        first = std::min(first, recipe.base_id);
+    }
+    return first;
+}
 void IndexedTemplatePlan::offsetEventIds(uint64_t offset) {
     for (auto& recipe : recipes_) {
         recipe.base_id = checkedIndexedAdd(

@@ -85,6 +85,9 @@ class IndexedTemplatePlan {
     const std::vector<IndexedTemplateRecipe>& recipes() const;
     const std::vector<IndexedTemplateEdge>& edges() const;
     uint64_t eventCount() const;
+    // Lowest concrete event ID; IDs are contiguous up to firstEventId() +
+    // eventCount() - 1 so a program can prove its calls never overlap.
+    uint64_t firstEventId() const;
     void offsetEventIds(uint64_t offset);
     uint32_t rank() const;
     const std::string& tierManifestDigest() const;
