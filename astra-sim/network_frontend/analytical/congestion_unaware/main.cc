@@ -175,7 +175,16 @@ int main(int argc, char* argv[]) {
     // Initiate simulation
     for (int i = 0; i < npus_count; i++) {
         systems[i]->workload->emit_rank_completions = rank_notifications;
-        systems[i]->workload->fire();
+        if (workload_configuration == "template-v3-idle") {
+            // Match the reference runner's one-nanosecond bootstrap marker.
+            // Defer completion itself, not just the first stdin handshake;
+            // ordinary idle rounds retain their existing one-ms quantum.
+            event_queue->schedule_event(1, [](void* system) {
+                static_cast<Sys*>(system)->workload->fire();
+            }, systems[i]);
+        } else {
+            systems[i]->workload->fire();
+        }
         // For debugging
         // systems[i]->workload->et_feeder->printGraph();
     }

@@ -282,7 +282,11 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
         } else if (node->is_cpu_op() ||
                    (!node->is_cpu_op() &&
                     node->type() == ChakraNodeType::COMP_NODE)) {
-            if ((node->runtime() == 0) && (node->num_ops() == 0)) {
+            // Timed replay uses the supplied duration, not an optional ops
+            // field. Legacy zero-runtime ET nodes may omit num_ops; reading
+            // it can otherwise turn a no-op into the replay fallback of 1 ns.
+            if ((node->runtime() == 0) &&
+                (!sys->roofline_enabled || (node->num_ops() == 0))) {
                 skip_invalid(node);
             } else {
                 if (sys->trace_enabled) {
