@@ -296,8 +296,20 @@ void IndexedTemplatePlan::loadRecipes(
             recipe.attributes.emplace(name, value);
         }
         const auto& expected = recipe_attributes(recipe.kind);
-        require(recipe.attributes.size() == expected.size(),
-                "recipe attributes do not exactly match kind");
+        const bool memory =
+            recipe.kind == "memory_load" || recipe.kind == "memory_store";
+        const bool has_ucie_schema =
+            recipe.attributes.count("ucie_transport_schema_version") != 0;
+        const bool has_ucie_link =
+            recipe.attributes.count("ucie_link_id") != 0;
+        require(has_ucie_schema == has_ucie_link,
+                "memory UCIe attributes must be a complete pair");
+        require(
+            recipe.attributes.size() ==
+                expected.size() + (has_ucie_schema ? 2 : 0),
+            "recipe attributes do not exactly match kind");
+        require(!has_ucie_schema || memory,
+                "only memory recipes may request UCIe transport");
         for (const auto& name : expected) {
             require(recipe.attributes.count(name) != 0,
                     "recipe is missing attribute " + name);

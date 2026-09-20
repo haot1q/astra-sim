@@ -614,6 +614,35 @@ bool invalid_inputs_fail_before_any_event() {
     return true;
 }
 
+bool memory_recipe_preserves_optional_ucie_transport() {
+    auto raw_definition = definition();
+    auto& attributes = raw_definition["recipes"][0]["attrs"];
+    attributes["ucie_transport_schema_version"] = "ucie-transport-v1";
+    attributes["ucie_link_id"] = "compute-hbm";
+    raw_definition["definition_digest"] =
+        IndexedTemplatePlan::definitionDigest(raw_definition);
+    IndexedTemplateWorkloadFeeder feeder(IndexedTemplatePlan::compile(
+        raw_definition, invocation(raw_definition, 4U, 2U), 0));
+    auto node = feeder.getNextIssuableNode();
+    if (node == nullptr ||
+        !node->has_other_attr("ucie_transport_schema_version") ||
+        !node->has_other_attr("ucie_link_id")) {
+        return false;
+    }
+
+    auto incomplete = definition();
+    incomplete["recipes"][0]["attrs"]["ucie_link_id"] = "compute-hbm";
+    incomplete["definition_digest"] =
+        IndexedTemplatePlan::definitionDigest(incomplete);
+    try {
+        IndexedTemplatePlan::compile(
+            incomplete, invocation(incomplete, 4U, 2U), 0);
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    return true;
+}
+
 Json read_json(const char* path) {
     std::ifstream stream(path);
     if (!stream) {
@@ -677,6 +706,7 @@ int main() {
                    bound_vectors_supply_per_entry_residency() &&
                    two_axis_domain_preserves_tuple_indices() &&
                    same_outer_allows_an_inactive_suffix() &&
+                   memory_recipe_preserves_optional_ucie_transport() &&
                    invalid_inputs_fail_before_any_event()
                ? 0
                : 1;

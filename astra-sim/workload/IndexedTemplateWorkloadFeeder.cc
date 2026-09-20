@@ -80,6 +80,14 @@ void add_bool(Node& node, const std::string& name, bool value) {
     attribute->set_bool_val(value);
 }
 
+void add_string(Node& node, const std::string& name,
+                const std::string& value) {
+    require(!value.empty(), name + " must be a nonempty string");
+    auto* attribute = node.add_attr();
+    attribute->set_name(name);
+    attribute->set_string_val(value);
+}
+
 ChakraProtoMsg::CollectiveCommType collective_type(
     const std::string& value) {
     if (value == "all_reduce") return ChakraProtoMsg::ALL_REDUCE;
@@ -183,6 +191,16 @@ IndexedTemplateWorkloadFeeder::makeNode(
                    uint32_value(attr("tensor_device"), "tensor_device"));
         add_uint32(*node, "tensor_channel",
                    uint32_value(attr("tensor_channel"), "tensor_channel"));
+        if (attributes.contains("ucie_transport_schema_version")) {
+            require(attr("ucie_transport_schema_version").is_string() &&
+                        attr("ucie_link_id").is_string(),
+                    "memory UCIe attributes must be strings");
+            add_string(
+                *node, "ucie_transport_schema_version",
+                attr("ucie_transport_schema_version").get<std::string>());
+            add_string(*node, "ucie_link_id",
+                       attr("ucie_link_id").get<std::string>());
+        }
     } else if (recipe.kind == "collective") {
         node->set_type(ChakraProtoMsg::COMM_COLL_NODE);
         require(attr("comm_type").is_string(), "comm_type must be string");
