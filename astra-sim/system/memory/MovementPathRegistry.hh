@@ -89,6 +89,32 @@ class MovementPathRegistry {
         return found->second;
     }
 
+    MovementPathSegmentConfig execution_segment(
+        const std::string& id, std::size_t index, const std::string& kind) const {
+        const auto& segments = capability(id).segments;
+        const bool reverse = id == "host_pcie" && kind == "page_demote";
+        auto segment = segments.at(reverse ? segments.size() - 1 - index : index);
+        if (reverse) {
+            segment.operation = segment.operation == "read" ? "write" : "read";
+        }
+        return segment;
+    }
+
+    void validate_host_endpoints(
+        const std::string& kind, uint32_t domain, uint32_t source_tier,
+        uint32_t source_device, uint32_t destination_tier,
+        uint32_t destination_device) const {
+        const auto& path = capability("host_pcie");
+        const bool promote = kind == "page_promote";
+        if ((!promote && kind != "page_demote") || domain >= path.host_domain_count ||
+            source_tier != (promote ? path.host_cold_tier_id : path.host_hot_tier_id) ||
+            destination_tier != (promote ? path.host_hot_tier_id : path.host_cold_tier_id) ||
+            source_device != (promote ? 0 : domain) ||
+            destination_device != (promote ? domain : 0)) {
+            throw std::invalid_argument("Host movement endpoints differ from manifest topology");
+        }
+    }
+
     const std::unordered_map<std::string, MovementBandwidthBinding>&
     resources() const {
         return resources_;

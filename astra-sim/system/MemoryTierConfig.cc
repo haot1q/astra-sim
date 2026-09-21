@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MemoryTierConfig.hh"
 
 #include "astra-sim/system/memory/BandwidthResource.hh"
+#include "astra-sim/system/memory/HostMovementConfig.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 
 #include <cstdio>
@@ -265,6 +266,11 @@ ParsedMovementPaths parse_movement_paths(
     const json& payload,
     const std::vector<UcieLinkConfig>& ucie_links) {
     if (!payload.contains("movement_paths")) {
+        if (payload.contains("home_domain_topology") &&
+            payload["home_domain_topology"].value("cold_endpoint_policy", "") ==
+                "shared_host_pool_v1") {
+            throw std::invalid_argument("shared Host topology requires host_pcie");
+        }
         return {};
     }
     const auto& raw = payload["movement_paths"];
@@ -359,7 +365,7 @@ ParsedMovementPaths parse_movement_paths(
              "timing_provenance", "segments"},
             context);
         const auto id = required_string(item, "id", context);
-        if ((id != "base_die_local" && id != "gpu_routed") ||
+        if ((id != "base_die_local" && id != "gpu_routed" && id != "host_pcie") ||
             !capability_ids.insert(id).second) {
             throw std::invalid_argument(
                 context + ".id is unsupported or duplicate");
@@ -431,7 +437,7 @@ ParsedMovementPaths parse_movement_paths(
             segments.push_back(
                 {segment_id, kind, resource_ref, operation, "payload"});
         }
-        const bool valid_base = id == "base_die_local" &&
+        const bool valid_base = (id == "base_die_local" || id == "host_pcie") &&
             segments.size() == 2 &&
             segments[0].kind == "bandwidth_resource" &&
             segments[0].operation == "read" &&
@@ -452,10 +458,16 @@ ParsedMovementPaths parse_movement_paths(
         capabilities.push_back(
             {id, expected_location, engine_count, max_priority_burst,
              max_in_flight, provenance, std::move(segments)});
+        if (id == "host_pcie") configure_host_movement(payload, capabilities.back());
     }
     if (!capability_ids.count(selected)) {
         throw std::invalid_argument(
             "selected movement path is not a declared capability");
+    }
+    const bool shared_host = payload.at("home_domain_topology").value(
+        "cold_endpoint_policy", "") == "shared_host_pool_v1";
+    if (shared_host != (selected == "host_pcie")) {
+        throw std::invalid_argument("shared Host topology and host_pcie must be selected together");
     }
     return {true, selected, std::move(capabilities), std::move(resources)};
 }

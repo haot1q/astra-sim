@@ -53,6 +53,10 @@ struct MovementPathCapabilityConfig {
     uint32_t max_in_flight_page_movements;
     std::string timing_provenance;
     std::vector<MovementPathSegmentConfig> segments;
+    // Derived from the validated shared Host topology, never from an ET.
+    uint32_t host_hot_tier_id = 0;
+    uint32_t host_cold_tier_id = 0;
+    uint32_t host_domain_count = 0;
 };
 
 struct MemoryTierConfigSet {

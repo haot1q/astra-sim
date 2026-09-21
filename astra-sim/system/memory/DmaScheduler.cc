@@ -15,7 +15,7 @@ namespace AstraSim {
 namespace {
 
 bool is_supported_path(const std::string& path_id) {
-    return path_id == "base_die_local" || path_id == "gpu_routed";
+    return path_id == "base_die_local" || path_id == "gpu_routed" || path_id == "host_pcie";
 }
 
 bool is_high_priority(DmaPriorityClass priority) {
@@ -57,9 +57,16 @@ void DmaScheduler::submit(DmaJob job) {
         throw std::invalid_argument(
             "DMA job path differs from the run-global selected path");
     }
-    if (job.source_device_id != job.destination_device_id) {
+    if (job.path_id != "host_pcie" && job.source_device_id != job.destination_device_id) {
         throw std::invalid_argument(
             "page movement must target the HBM paired with its source device");
+    }
+    if (job.path_id == "host_pcie" && (
+        !job.page_movement ||
+        (job.kind != "page_promote" && job.kind != "page_demote") ||
+        job.source_tier_id == job.destination_tier_id ||
+        (job.kind == "page_promote" ? job.source_device_id : job.destination_device_id) != 0)) {
+        throw std::invalid_argument("Host DMA requires a Page and shared cold device 0");
     }
     if (job.resource_ids.empty()) {
         throw std::invalid_argument("DMA job must declare path resources");

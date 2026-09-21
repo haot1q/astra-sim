@@ -369,7 +369,8 @@ bool MemoryMovementExecutor::submit_owned(
             throw std::invalid_argument(
                 "ET movement path segment cardinality differs from manifest");
         }
-        std::vector<std::string> expected_resources = {"lpddr_read"};
+        std::vector<std::string> expected_resources = {
+            path_id == "host_pcie" ? "host_read" : "lpddr_read"};
         for (std::size_t index = 0; index < segment_count; ++index) {
             const auto& segment = capability.segments[index];
             if (segment_ids[index] != segment.id ||
@@ -444,7 +445,19 @@ bool MemoryMovementExecutor::submit_owned(
         foreground,
         page_movement,
     };
-    if (page_movement &&
+    if (path_id == "host_pcie") {
+        if (!home_domain_id.has_value()) {
+            throw std::invalid_argument("Host movement requires a home domain");
+        }
+        sys_->movement_paths.validate_host_endpoints(
+            kind, *home_domain_id, job.source_tier_id, job.source_device_id,
+            job.destination_tier_id, job.destination_device_id);
+        if (kind == "page_demote") {
+            std::reverse(job.resource_ids.begin() + 1, job.resource_ids.end() - 1);
+            job.resource_ids.front() = "hbm_read";
+            job.resource_ids.back() = "host_write";
+        }
+    } else if (page_movement &&
         (*home_domain_id != job.source_device_id ||
          *home_domain_id != job.destination_device_id)) {
         throw std::invalid_argument(
@@ -552,12 +565,15 @@ void MemoryMovementExecutor::start_segment_hop(
     if (segment_index >= capability.segments.size()) {
         throw std::out_of_range("movement segment index is out of range");
     }
-    const auto& segment = capability.segments[segment_index];
+    const auto segment = sys_->movement_paths.execution_segment(
+        active.path_id, segment_index, active.kind);
     auto* data = new MovementHandlerData;
     data->sys_id = sys_->id;
     data->completion_target = this;
     data->event_id = event_id;
-    data->device_id = active.source_device_id;
+    const auto domain = active.path_id == "host_pcie" && active.kind == "page_promote"
+        ? active.destination_device_id : active.source_device_id;
+    data->device_id = domain;
     data->stage = MovementStage::Intermediate;
     data->segment_index = segment_index;
     data->hop_index = hop_index;
@@ -569,7 +585,7 @@ void MemoryMovementExecutor::start_segment_hop(
             }
             const auto& resource =
                 sys_->movement_resource(segment.resource_ref);
-            if (active.source_device_id >= resource.stack_count) {
+            if (domain >= resource.stack_count) {
                 throw std::out_of_range(
                     "movement resource home domain is out of range");
             }
@@ -751,9 +767,8 @@ void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
         finish(event_id);
     } else {
         const auto active = scheduler_->active_job(event_id);
-        const auto& segment = sys_->movement_paths
-            .capability(active.path_id)
-            .segments[segment_index];
+        const auto segment = sys_->movement_paths.execution_segment(
+            active.path_id, segment_index, active.kind);
         std::size_t hop_count = 1;
         if (segment.kind == "ucie_transaction") {
             const auto& link = sys_->ucie_link(segment.resource_ref);
