@@ -11,6 +11,7 @@ LICENSE file in the root directory of this source tree.
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "astra-sim/system/Callable.hh"
 #include "astra-sim/system/CommunicatorGroup.hh"
@@ -86,6 +87,9 @@ class Workload : public Callable {
     std::queue<PendingWorkload> pending_workloads;
 
   private:
+    void issue_dependency_delay(
+        const std::shared_ptr<Chakra::ETFeederNode>& node, uint64_t duration_ns);
+    std::unordered_set<uint64_t> pending_dependency_delays_;
     std::unique_ptr<WorkloadFeeder> prepare_template_feeder(
         const std::string& command);
     void validate_feeder(const WorkloadFeeder& feeder) const;

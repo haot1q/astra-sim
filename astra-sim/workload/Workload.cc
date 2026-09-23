@@ -4,6 +4,7 @@ LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
 #include "astra-sim/workload/Workload.hh"
+#include "astra-sim/workload/DependencyDelay.hh"
 
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/IntData.hh"
@@ -232,7 +233,9 @@ void Workload::issue_dep_free_nodes() {
     std::queue<shared_ptr<Chakra::ETFeederNode>> push_back_queue;
     shared_ptr<Chakra::ETFeederNode> node = et_feeder->getNextIssuableNode();
     while (node != nullptr) {
-        if (hw_resource->is_available(node)) {
+        if (node->has_other_attr("dependency_delay_schema") ||
+            node->has_other_attr("dependency_delay_ns") ||
+            hw_resource->is_available(node)) {
             issue(node);
         } else {
             push_back_queue.push(node);
@@ -249,6 +252,19 @@ void Workload::issue_dep_free_nodes() {
 }
 
 void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
+    try {
+        if (const auto delay = dependency_delay_ns(node)) {
+            issue_dependency_delay(node, *delay);
+            return;
+        }
+    } catch (const std::exception& error) {
+        // Sys::call_events otherwise swallows callback exceptions and strands
+        // the rank. Invalid delay contracts must fail like movement dispatch.
+        LoggerFactory::get_logger("workload")->critical(
+            "Dependency delay dispatch failed for node {}: {}",
+            node->id(), error.what());
+        exit(EXIT_FAILURE);
+    }
     auto logger = LoggerFactory::get_logger("workload");
     if (sys->memory_movement_executor->is_wait_node(node)) {
         if (!pending_memory_waits_.emplace(node->id(), node).second) {
@@ -396,6 +412,9 @@ void Workload::record_parent_completion(
 }
 
 void Workload::reset_iteration_tracking() {
+    if (!pending_dependency_delays_.empty()) {
+        throw std::logic_error("cannot replace ET with pending dependency delays");
+    }
     if (!pending_memory_waits_.empty()) {
         throw std::logic_error("cannot replace ET with pending memory waits");
     }
@@ -693,7 +712,9 @@ void Workload::call(EventType event, CallData* data) {
                             node->name(), static_cast<uint64_t>(node->type()));
             }
 
-            hw_resource->release(node);
+            if (pending_dependency_delays_.erase(node->id()) == 0) {
+                hw_resource->release(node);
+            }
 
             et_feeder->freeChildrenNodes(node->id());
 
@@ -708,6 +729,7 @@ void Workload::call(EventType event, CallData* data) {
     }
 
     if (!et_feeder->hasNodesToIssue() && pending_memory_waits_.empty() &&
+        pending_dependency_delays_.empty() &&
         (hw_resource->num_in_flight_cpu_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comp_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comm_ops == 0) ) {

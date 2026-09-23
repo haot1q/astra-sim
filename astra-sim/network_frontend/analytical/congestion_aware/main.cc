@@ -31,6 +31,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionAware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--dependency-delay-capability") {
+        std::cout << "dependency-delay-v1" << std::endl;
+        return 0;
+    }
     // Parse command line arguments
     auto cmd_line_parser = CmdLineParser(argv[0]);
     cmd_line_parser.parse(argc, argv);
