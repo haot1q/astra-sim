@@ -180,6 +180,8 @@ json receipt_json(const DmaReceipt& receipt,
         payload["expected_residency_version"] =
             *expected_residency_version;
         payload["home_domain_id"] = *home_domain_id;
+    } else if (home_domain_id.has_value()) {
+        payload["home_domain_id"] = *home_domain_id;
     }
     return payload;
 }
@@ -287,11 +289,14 @@ bool MemoryMovementExecutor::submit_owned(
     }
     const std::string kind = string_attr(node, "movement_kind");
     if (kind != "load" && kind != "store" && kind != "page_promote" &&
-        kind != "page_demote") {
+        kind != "page_demote" && kind != "kv_cold_copy_store" &&
+        kind != "kv_cold_copy_load") {
         throw std::invalid_argument("unsupported memory movement kind");
     }
     const bool page_movement =
         kind == "page_promote" || kind == "page_demote";
+    const bool cold_copy =
+        kind == "kv_cold_copy_store" || kind == "kv_cold_copy_load";
     std::optional<std::string> page_id;
     std::optional<std::string> transaction_id;
     std::optional<uint32_t> expected_residency_version;
@@ -304,10 +309,14 @@ bool MemoryMovementExecutor::submit_owned(
         home_domain_id = uint32_attr(node, "movement_home_domain_id");
     } else if (node->has_other_attr("movement_page_id") ||
                node->has_other_attr("movement_transaction_id") ||
-               node->has_other_attr("movement_expected_residency_version") ||
-               node->has_other_attr("movement_home_domain_id")) {
+               node->has_other_attr("movement_expected_residency_version")) {
         throw std::invalid_argument(
             "non-page movement must not carry page identity");
+    }
+    if (cold_copy) {
+        home_domain_id = uint32_attr(node, "movement_home_domain_id");
+    } else if (!page_movement && node->has_other_attr("movement_home_domain_id")) {
+        throw std::invalid_argument("ordinary movement cannot carry a home domain");
     }
     const std::string path_id = string_attr(node, "movement_path_id");
     const bool has_path_contract =
@@ -443,7 +452,7 @@ bool MemoryMovementExecutor::submit_owned(
         resource_ids,
         string_list_attr(node, "movement_dependencies"),
         foreground,
-        page_movement,
+        page_movement || cold_copy,
     };
     if (path_id == "host_pcie") {
         if (!home_domain_id.has_value()) {
@@ -452,7 +461,7 @@ bool MemoryMovementExecutor::submit_owned(
         sys_->movement_paths.validate_host_endpoints(
             kind, *home_domain_id, job.source_tier_id, job.source_device_id,
             job.destination_tier_id, job.destination_device_id);
-        if (kind == "page_demote") {
+        if (kind == "page_demote" || kind == "kv_cold_copy_store") {
             std::reverse(job.resource_ids.begin() + 1, job.resource_ids.end() - 1);
             job.resource_ids.front() = "hbm_read";
             job.resource_ids.back() = "host_write";
@@ -571,7 +580,8 @@ void MemoryMovementExecutor::start_segment_hop(
     data->sys_id = sys_->id;
     data->completion_target = this;
     data->event_id = event_id;
-    const auto domain = active.path_id == "host_pcie" && active.kind == "page_promote"
+    const auto domain = active.path_id == "host_pcie" &&
+        (active.kind == "page_promote" || active.kind == "kv_cold_copy_load")
         ? active.destination_device_id : active.source_device_id;
     data->device_id = domain;
     data->stage = MovementStage::Intermediate;

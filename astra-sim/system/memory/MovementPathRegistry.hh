@@ -92,7 +92,8 @@ class MovementPathRegistry {
     MovementPathSegmentConfig execution_segment(
         const std::string& id, std::size_t index, const std::string& kind) const {
         const auto& segments = capability(id).segments;
-        const bool reverse = id == "host_pcie" && kind == "page_demote";
+        const bool reverse = id == "host_pcie" &&
+            (kind == "page_demote" || kind == "kv_cold_copy_store");
         auto segment = segments.at(reverse ? segments.size() - 1 - index : index);
         if (reverse) {
             segment.operation = segment.operation == "read" ? "write" : "read";
@@ -105,8 +106,9 @@ class MovementPathRegistry {
         uint32_t source_device, uint32_t destination_tier,
         uint32_t destination_device) const {
         const auto& path = capability("host_pcie");
-        const bool promote = kind == "page_promote";
-        if ((!promote && kind != "page_demote") || domain >= path.host_domain_count ||
+        const bool promote = kind == "page_promote" || kind == "kv_cold_copy_load";
+        if ((!promote && kind != "page_demote" && kind != "kv_cold_copy_store") ||
+            domain >= path.host_domain_count ||
             source_tier != (promote ? path.host_cold_tier_id : path.host_hot_tier_id) ||
             destination_tier != (promote ? path.host_hot_tier_id : path.host_cold_tier_id) ||
             source_device != (promote ? 0 : domain) ||

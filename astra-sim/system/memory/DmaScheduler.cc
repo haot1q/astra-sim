@@ -63,10 +63,12 @@ void DmaScheduler::submit(DmaJob job) {
     }
     if (job.path_id == "host_pcie" && (
         !job.page_movement ||
-        (job.kind != "page_promote" && job.kind != "page_demote") ||
+        (job.kind != "page_promote" && job.kind != "page_demote" &&
+         job.kind != "kv_cold_copy_store" && job.kind != "kv_cold_copy_load") ||
         job.source_tier_id == job.destination_tier_id ||
-        (job.kind == "page_promote" ? job.source_device_id : job.destination_device_id) != 0)) {
-        throw std::invalid_argument("Host DMA requires a Page and shared cold device 0");
+        ((job.kind == "page_promote" || job.kind == "kv_cold_copy_load")
+             ? job.source_device_id : job.destination_device_id) != 0)) {
+        throw std::invalid_argument("Host DMA requires typed movement and shared cold device 0");
     }
     if (job.resource_ids.empty()) {
         throw std::invalid_argument("DMA job must declare path resources");
