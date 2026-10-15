@@ -125,14 +125,30 @@ RankWork parse_rank_work(const Json& item, bool direct) {
         Wire::fields(event, {"logical_event_id", "physical_event_id"});
         const auto physical = text(event.at("physical_event_id"));
         const auto logical = text(event.at("logical_event_id"));
-        if (!result.physical_ids.insert(physical).second ||
-            !result.logical_ids.insert(logical).second) {
+        if (!result.physical_ids.insert(physical).second) {
             throw std::invalid_argument(
                 "duplicate preparation event mapping");
         }
+        result.logical_ids.insert(logical);
         result.logical_by_physical.emplace(physical, logical);
     }
     return result;
+}
+
+void validate_logical_fragment(
+    const std::shared_ptr<Chakra::ETFeederNode>& node,
+    const std::string& logical,
+    std::map<std::string, std::pair<std::string, std::string>>& contracts) {
+    const auto contract = std::make_pair(
+        attribute(node, "movement_path_id"), attribute(node, "movement_kind"));
+    const auto inserted = contracts.emplace(logical, contract);
+    if (!inserted.second &&
+        (inserted.first->second != contract || contract.first != "base_die_local" ||
+         (contract.second != "kv_cold_copy_store" &&
+          contract.second != "kv_cold_copy_load"))) {
+        throw std::invalid_argument(
+            "repeated logical preparation requires same-direction paired cold fragments");
+    }
 }
 
 Json read_direct_sidecar(
@@ -252,6 +268,7 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
             text(owner.at("service_binding_digest")),
             text(owner.at("service_activation_id")), rank);
         std::set<std::string> observed;
+        std::map<std::string, std::pair<std::string, std::string>> logical_contracts;
         const auto nodes =
             read_nodes(path, item, owner, parsed, stage, schema.direct);
         for (const auto& node : nodes) {
@@ -261,6 +278,8 @@ PdLocalPreparationExecutor::read_work(const std::string& path) const {
                 throw std::invalid_argument("preparation ET event mapping mismatch");
             }
             validate_node(node, owner, parsed.physical_ids);
+            validate_logical_fragment(
+                node, parsed.logical_by_physical.at(event_id), logical_contracts);
             submissions.push_back(
                 {rank, parsed.logical_by_physical.at(event_id),
                  event_id, owner, node});

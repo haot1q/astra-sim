@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "extern/helper/json/json.hpp"
@@ -57,6 +58,8 @@ struct MovementPathCapabilityConfig {
     uint32_t host_hot_tier_id = 0;
     uint32_t host_cold_tier_id = 0;
     uint32_t host_domain_count = 0;
+    // Original manifest hot/cold tier IDs, indexed by paired device/domain.
+    std::vector<std::pair<uint32_t, uint32_t>> paired_cold_tiers;
 };
 
 struct MemoryTierConfigSet {

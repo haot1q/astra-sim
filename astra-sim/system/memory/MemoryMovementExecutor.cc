@@ -319,14 +319,17 @@ bool MemoryMovementExecutor::submit_owned(
         throw std::invalid_argument("ordinary movement cannot carry a home domain");
     }
     const std::string path_id = string_attr(node, "movement_path_id");
-    if (cold_copy && path_id != "host_pcie") {
-        throw std::invalid_argument("cold copy movement requires host_pcie");
+    if (cold_copy && path_id != "host_pcie" && path_id != "base_die_local") {
+        throw std::invalid_argument("cold copy movement requires Host or paired-local path");
     }
     const bool has_path_contract =
         node->has_other_attr("movement_path_contract_status");
     const std::string path_contract_status = has_path_contract
         ? string_attr(node, "movement_path_contract_status")
         : "compatibility_checkpoint";
+    if (cold_copy && path_contract_status != "implemented") {
+        throw std::invalid_argument("cold copy movement requires implemented path");
+    }
     const std::string path_schema_version = has_path_contract
         ? string_attr(node, "movement_path_schema_version")
         : "adr-0020-checkpoint";
@@ -464,16 +467,24 @@ bool MemoryMovementExecutor::submit_owned(
         sys_->movement_paths.validate_host_endpoints(
             kind, *home_domain_id, job.source_tier_id, job.source_device_id,
             job.destination_tier_id, job.destination_device_id);
-        if (kind == "page_demote" || kind == "kv_cold_copy_store") {
-            std::reverse(job.resource_ids.begin() + 1, job.resource_ids.end() - 1);
-            job.resource_ids.front() = "hbm_read";
-            job.resource_ids.back() = "host_write";
-        }
-    } else if (page_movement &&
+    } else if ((page_movement || cold_copy) &&
         (*home_domain_id != job.source_device_id ||
          *home_domain_id != job.destination_device_id)) {
         throw std::invalid_argument(
             "movement home_domain_id must match paired device IDs");
+    }
+    if (cold_copy && job.source_tier_id == job.destination_tier_id) {
+        throw std::invalid_argument("cold copy movement requires distinct endpoint tiers");
+    }
+    if (cold_copy && path_id == "base_die_local") {
+        sys_->movement_paths.validate_paired_cold_endpoints(
+            kind, *home_domain_id, job.source_tier_id, job.destination_tier_id);
+    }
+    if ((path_id == "host_pcie" && kind == "page_demote") ||
+        kind == "kv_cold_copy_store") {
+        std::reverse(job.resource_ids.begin() + 1, job.resource_ids.end() - 1);
+        job.resource_ids.front() = "hbm_read";
+        job.resource_ids.back() = path_id == "host_pcie" ? "host_write" : "lpddr_write";
     }
     const auto instance_id = string_attr(node, "movement_instance_id");
     const auto source_iteration = job.source_iteration_id;

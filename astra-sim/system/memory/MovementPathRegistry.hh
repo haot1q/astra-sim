@@ -92,8 +92,9 @@ class MovementPathRegistry {
     MovementPathSegmentConfig execution_segment(
         const std::string& id, std::size_t index, const std::string& kind) const {
         const auto& segments = capability(id).segments;
-        const bool reverse = id == "host_pcie" &&
-            (kind == "page_demote" || kind == "kv_cold_copy_store");
+        const bool reverse = (id == "host_pcie" && kind == "page_demote") ||
+            ((id == "host_pcie" || id == "base_die_local") &&
+             kind == "kv_cold_copy_store");
         auto segment = segments.at(reverse ? segments.size() - 1 - index : index);
         if (reverse) {
             segment.operation = segment.operation == "read" ? "write" : "read";
@@ -114,6 +115,20 @@ class MovementPathRegistry {
             source_device != (promote ? 0 : domain) ||
             destination_device != (promote ? domain : 0)) {
             throw std::invalid_argument("Host movement endpoints differ from manifest topology");
+        }
+    }
+
+    void validate_paired_cold_endpoints(
+        const std::string& kind, uint32_t domain, uint32_t source_tier,
+        uint32_t destination_tier) const {
+        const auto& pairs = capability("base_die_local").paired_cold_tiers;
+        const bool load = kind == "kv_cold_copy_load";
+        if ((!load && kind != "kv_cold_copy_store") || domain >= pairs.size() ||
+            !pairs[domain].first || !pairs[domain].second ||
+            source_tier != (load ? pairs[domain].second : pairs[domain].first) ||
+            destination_tier != (load ? pairs[domain].first : pairs[domain].second)) {
+            throw std::invalid_argument(
+                "paired cold copy endpoints differ from manifest topology");
         }
     }
 

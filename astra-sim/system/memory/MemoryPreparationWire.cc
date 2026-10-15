@@ -107,8 +107,11 @@ void validate_event_fields(const Json& sidecar, const Json& event) {
             {"event_id", "home_domain_id", "source_iteration_id", "npu_id",
              "kind", "phase", "source", "destination", "bytes",
              "priority_class", "depends_on", "releases"});
-        if (sidecar.at("selected_path").at("id") != "host_pcie") {
-            throw std::invalid_argument("cold copy preparation requires host_pcie");
+        const auto& path = sidecar.at("selected_path");
+        if ((path.at("id") != "host_pcie" && path.at("id") != "base_die_local") ||
+            path.at("contract_status") != "implemented") {
+            throw std::invalid_argument(
+                "cold copy preparation requires implemented Host or paired-local path");
         }
     } else {
         Wire::fields(

@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/system/memory/BandwidthResource.hh"
 #include "astra-sim/system/memory/HostMovementConfig.hh"
+#include "astra-sim/system/memory/PairedColdCopyConfig.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 
 #include <cstdio>
@@ -459,6 +460,7 @@ ParsedMovementPaths parse_movement_paths(
             {id, expected_location, engine_count, max_priority_burst,
              max_in_flight, provenance, std::move(segments)});
         if (id == "host_pcie") configure_host_movement(payload, capabilities.back());
+        if (id == "base_die_local") configure_paired_cold_copy(payload, capabilities.back());
     }
     if (!capability_ids.count(selected)) {
         throw std::invalid_argument(
