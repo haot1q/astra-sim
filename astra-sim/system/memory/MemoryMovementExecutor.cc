@@ -319,6 +319,9 @@ bool MemoryMovementExecutor::submit_owned(
         throw std::invalid_argument("ordinary movement cannot carry a home domain");
     }
     const std::string path_id = string_attr(node, "movement_path_id");
+    if (cold_copy && path_id != "host_pcie") {
+        throw std::invalid_argument("cold copy movement requires host_pcie");
+    }
     const bool has_path_contract =
         node->has_other_attr("movement_path_contract_status");
     const std::string path_contract_status = has_path_contract

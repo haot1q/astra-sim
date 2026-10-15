@@ -99,6 +99,28 @@ struct MovementInput {
     std::vector<std::string> dependencies;
 };
 
+void validate_event_fields(const Json& sidecar, const Json& event) {
+    const auto kind = text(event.at("kind"));
+    if (kind == "kv_cold_copy_store" || kind == "kv_cold_copy_load") {
+        Wire::fields(
+            event,
+            {"event_id", "home_domain_id", "source_iteration_id", "npu_id",
+             "kind", "phase", "source", "destination", "bytes",
+             "priority_class", "depends_on", "releases"});
+        if (sidecar.at("selected_path").at("id") != "host_pcie") {
+            throw std::invalid_argument("cold copy preparation requires host_pcie");
+        }
+    } else {
+        Wire::fields(
+            event,
+            {"event_id", "page_id", "transaction_id",
+             "expected_residency_version", "home_domain_id",
+             "source_iteration_id", "npu_id", "kind", "phase", "source",
+             "destination", "bytes", "priority_class", "depends_on",
+             "releases"});
+    }
+}
+
 MovementInput validate_input(
     const Json& sidecar, const Json& event, uint32_t rank) {
     Wire::fields(
@@ -110,13 +132,7 @@ MovementInput validate_input(
         throw std::invalid_argument(
             "direct preparation requires memory-events-v1 external work");
     }
-    Wire::fields(
-        event,
-        {"event_id", "page_id", "transaction_id",
-         "expected_residency_version", "home_domain_id",
-         "source_iteration_id", "npu_id", "kind", "phase", "source",
-         "destination", "bytes", "priority_class", "depends_on",
-         "releases"});
+    validate_event_fields(sidecar, event);
     if (Wire::uint32(event.at("npu_id")) != rank ||
         !event.at("releases").is_array() ||
         !event.at("releases").empty()) {
@@ -217,13 +233,14 @@ void add_identity_attributes(
     add_string(
         node, "movement_priority_class",
         text(event.at("priority_class")));
-    add_string(node, "movement_page_id", text(event.at("page_id")));
-    add_string(
-        node, "movement_transaction_id",
-        text(event.at("transaction_id")));
-    add_uint32(
-        node, "movement_expected_residency_version",
-        Wire::uint32(event.at("expected_residency_version")));
+    if (event.contains("page_id")) {
+        add_string(node, "movement_page_id", text(event.at("page_id")));
+        add_string(
+            node, "movement_transaction_id", text(event.at("transaction_id")));
+        add_uint32(
+            node, "movement_expected_residency_version",
+            Wire::uint32(event.at("expected_residency_version")));
+    }
     add_uint32(
         node, "movement_home_domain_id",
         Wire::uint32(event.at("home_domain_id")));
