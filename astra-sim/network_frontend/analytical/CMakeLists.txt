@@ -31,6 +31,17 @@ file(GLOB srcs_congestion_aware
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(AstraSim_ETFeederLifecycle_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/graph_frontend/chakra/tests/feeder/lifecycle_test.cpp)
+    target_link_libraries(AstraSim_ETFeederLifecycle_Test PRIVATE AstraSim)
+    target_include_directories(AstraSim_ETFeederLifecycle_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/graph_frontend/chakra/src/feeder)
+    foreach(lifecycle_case small window window-plus-one removed-parent concurrent)
+        add_test(NAME AstraSim_ETFeederLifecycle_${lifecycle_case}
+                COMMAND AstraSim_ETFeederLifecycle_Test ${lifecycle_case})
+        set_tests_properties(AstraSim_ETFeederLifecycle_${lifecycle_case} PROPERTIES
+                TIMEOUT 180 RESOURCE_LOCK chakra_feeder_window)
+    endforeach()
     add_executable(AstraSim_PdPathWork_Test tests/PdPathWorkTest.cc)
     target_link_libraries(AstraSim_PdPathWork_Test PRIVATE AstraSim)
     add_executable(AstraSim_NativeTagRegistry_Test tests/NativeTagRegistryTest.cc)
