@@ -131,7 +131,7 @@ class MemoryMovementExecutor : public Callable {
     struct Submission {
         uint64_t node_id;
         MovementCompletionOwner completion;
-        bool foreground;
+        bool retain_in_workload;
         std::string run_id;
         std::string instance_id;
         std::string manifest_digest;

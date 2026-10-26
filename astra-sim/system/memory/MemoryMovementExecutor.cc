@@ -115,6 +115,27 @@ std::vector<std::string> string_list_attr(
             attr.string_list().values().end()};
 }
 
+bool retain_workload_node(const std::shared_ptr<ETFeederNode>& node,
+                          bool foreground) {
+    std::optional<bool> has_consumers;
+    for (const auto& attr : node->getChakraNode()->attr()) {
+        if (attr.name() != "movement_has_consumers") continue;
+        if (has_consumers.has_value() || !attr.has_bool_val()) {
+            throw std::invalid_argument(
+                "movement_has_consumers must be one boolean attribute");
+        }
+        has_consumers = attr.bool_val();
+    }
+    // Child nodes can appear in a later feeder window. Only the complete
+    // producer-known hint can prove the new background-consumer contract.
+    // Missing hints keep the old legal input contract; they do not guess it.
+    if (!has_consumers.value_or(foreground) && !node->getChildren().empty()) {
+        throw std::invalid_argument(
+            "movement_has_consumers is missing or false for dependent ET nodes");
+    }
+    return foreground || has_consumers.value_or(false);
+}
+
 json receipt_json(const DmaReceipt& receipt,
                   const std::string& run_id,
                   const std::string& instance_id,
@@ -438,10 +459,7 @@ bool MemoryMovementExecutor::submit_owned(
         throw std::invalid_argument("unsupported memory movement phase");
     }
     const bool foreground = phase != "background_fill";
-    if (!foreground && !node->getChildren().empty()) {
-        throw std::invalid_argument(
-            "background movement must not release ET compute nodes");
-    }
+    const bool retain_in_workload = retain_workload_node(node, foreground);
     DmaJob job{
         event_id,
         uint32_attr(node, "movement_source_iteration_id"),
@@ -499,7 +517,7 @@ bool MemoryMovementExecutor::submit_owned(
         event_id, Submission{
                       node->id(),
                       std::move(completion),
-                      foreground,
+                      retain_in_workload,
                       run_id,
                       string_attr(node, "movement_instance_id"),
                       manifest_digest,
@@ -523,7 +541,7 @@ bool MemoryMovementExecutor::submit_owned(
     if (!inserted.second) {
         throw std::invalid_argument("duplicate movement submission context");
     }
-    return foreground;
+    return retain_in_workload;
 }
 
 void MemoryMovementExecutor::dispatch() {
@@ -684,7 +702,7 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
     const auto* workload =
         std::get_if<WorkloadMovementCompletion>(&submission.completion);
     const std::optional<uint64_t> exposed_to_dependent_ns =
-        submission.foreground && workload != nullptr
+        submission.retain_in_workload && workload != nullptr
             ? workload->workload.get().movement_exposed_to_dependent_ns(
                   submission.node_id, receipt.ready_ns, receipt.finish_ns)
             : std::nullopt;
@@ -707,7 +725,7 @@ void MemoryMovementExecutor::finish(const std::string& event_id) {
     // failure must not let drained() report a successful cleanup.
     if (workload != nullptr) {
         emit_memory_protocol_line("MEMORY_MOVEMENT_COMPLETE " + serialized);
-        if (submission.foreground) {
+        if (submission.retain_in_workload) {
             workload->workload.get().complete_memory_movement(submission.node_id);
         }
     } else {

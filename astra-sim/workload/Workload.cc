@@ -337,9 +337,9 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
 void Workload::issue_memory_movement(
     shared_ptr<Chakra::ETFeederNode> node) {
     try {
-        const bool foreground =
+        const bool retain_in_workload =
             sys->memory_movement_executor->submit(node, this);
-        if (!foreground) {
+        if (!retain_in_workload) {
             et_feeder->freeChildrenNodes(node->id());
             et_feeder->removeNode(node->id());
         }
