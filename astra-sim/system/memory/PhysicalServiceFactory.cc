@@ -15,19 +15,27 @@ namespace AstraSim {
 
 PhysicalServiceFactory::PhysicalServiceFactory(
     const MemoryTierConfigSet& memory, const std::string& binding_path, uint32_t rank_count,
-    const std::string& pd_path_binding_path)
+    const std::string& pd_path_binding_path, const std::string& transport_path)
     : native_(memory.native) {
     if (native_) {
         config_ = load_physical_service_config(binding_path, memory, rank_count);
         pd_config_ = load_pd_path_service_config(pd_path_binding_path, config_);
+        transport_config_ = load_transport_service_config(transport_path, config_);
         for (const auto& [ref, backend] : config_.backends) {
             physical_.emplace(ref, own(backend, true));
         }
         for (const auto& [ref, backend] : pd_config_.declared_backends) {
             physical_.emplace(ref, own(backend, true));
         }
+        for (const auto& [ref, resource] : transport_config_.resources) {
+            if (physical_.count(ref)) throw std::invalid_argument("transport resource ID collision");
+            physical_.emplace(ref, own({
+                {"memory-type", "MEMORY_POOL"}, {"memory-location", "REMOTE_MEMORY"},
+                {"num-devices", 1u}, {"mem-latency", resource.latency_ns},
+                {"bandwidth-resource", bandwidth_resource_config_to_json(resource.bandwidth)}}, true));
+        }
     } else {
-        if (!binding_path.empty() || !pd_path_binding_path.empty()) {
+        if (!binding_path.empty() || !pd_path_binding_path.empty() || !transport_path.empty()) {
             throw std::invalid_argument("legacy memory cannot use physical service bindings");
         }
         legacy_backends(memory);
@@ -126,7 +134,24 @@ const PdPathServiceConfig& PhysicalServiceFactory::pd_path_config() const {
     return pd_config_;
 }
 
+TransportServiceAdapter& PhysicalServiceFactory::transport(
+    uint32_t rank, const std::string& link_id) {
+    const auto link = transport_config_.links.find(link_id);
+    if (!config_.ranks.count(rank) || link == transport_config_.links.end()) {
+        throw std::invalid_argument("unbound transport rank or service link");
+    }
+    const auto key = std::make_pair(rank, link_id);
+    if (!transports_.count(key)) {
+        adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(rank,
+            std::vector<AstraMemoryAPI*>{physical_.at(link->second.resource)}, MemoryTimeRounding::Ceil));
+        transports_.emplace(key, std::make_unique<TransportServiceAdapter>(rank, link->second,
+            transport_config_.resources.at(link->second.resource), *adapters_.back()));
+    }
+    return *transports_.at(key);
+}
+
 void PhysicalServiceFactory::rethrow_failure() const {
+    for (const auto& [key, transport] : transports_) transport->rethrow_failure();
     for (const auto& adapter : adapters_) adapter->rethrow_failure();
     for (const auto& memory : memories_) memory->rethrow_failure();
 }

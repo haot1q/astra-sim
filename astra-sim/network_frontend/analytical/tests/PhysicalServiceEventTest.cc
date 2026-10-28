@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -108,6 +109,31 @@ struct Completion : Callable {
     }
 };
 
+struct TaggedTransport : TransportRequest {
+    using TransportRequest::TransportRequest;
+    int marker = 42;
+};
+
+struct TransportCompletion : Callable {
+    unsigned calls = 0;
+    void call(EventType, CallData* data) override {
+        auto* context = static_cast<TaggedTransport*>(data);
+        require(context->marker == 42, "transport lost derived handler state");
+        const auto result = context->receipt();
+        ++calls;
+        LoggerFactory::get_logger("physical-service-test")->info(
+            "TRANSPORT request={} resource={} link={} bytes={} ready={} start={} finish={}",
+            result.request_id, result.resource_id, result.link_id, result.payload_bytes,
+            result.ready_ns, result.start_ns, result.finish_ns);
+    }
+};
+
+struct DelayedTransport : Callable {
+    TransportServiceAdapter* api = nullptr;
+    TransportRequest* request = nullptr;
+    void call(EventType, CallData*) override { api->issue(*request); }
+};
+
 struct RequestPattern {
     MemoryOperation second = MemoryOperation::Read;
     uint32_t device = 0;
@@ -117,6 +143,54 @@ struct RequestPattern {
     std::string interface_id;
     bool first_memory = false;
     uint64_t first_finish = 0;
+    bool transport = false;
+    uint64_t second_ready = 0;
+    unsigned requests = 2;
+};
+
+struct TransportRun {
+    TransportCompletion completion;
+    std::vector<std::unique_ptr<TaggedTransport>> requests;
+    DelayedTransport delayed;
+
+    void issue(PhysicalServiceFactory& services, Sys& sys, unsigned rank,
+               const RequestPattern& pattern) {
+        auto& api = services.transport(rank, rank == 0 ? "out" : "back");
+        api.set_sys(&sys);
+        requests.push_back(std::make_unique<TaggedTransport>(rank,
+            "request-" + std::to_string(rank), rank == 1 && pattern.second_bytes
+                ? pattern.second_bytes : pattern.bytes, completion));
+        auto& request = *requests.back();
+        if (rank == 1 && pattern.second_ready) {
+            delayed.api = &api;
+            delayed.request = &request;
+            sys.register_event(&delayed, EventType::General, nullptr, pattern.second_ready);
+        } else {
+            api.issue(request);
+        }
+        bool rejected = false;
+        try { request.receipt(); } catch (const std::logic_error&) { rejected = true; }
+        require(rejected, "submission was reported as completed transport");
+    }
+
+    void check(const RequestPattern& pattern, uint64_t second_finish) const {
+        require(completion.calls == pattern.requests, "transport callback count mismatch");
+        const auto first = requests[0]->receipt();
+        require(first.finish_ns == pattern.first_finish && first.ready_ns == 0 && first.start_ns == 0,
+                "first transport duration changed");
+        if (pattern.requests == 2) {
+            const auto second = requests[1]->receipt();
+            require(second.finish_ns == second_finish && second.ready_ns == pattern.second_ready &&
+                    second.start_ns == second_finish - pattern.first_finish,
+                    "transport shared queue or actual ready time mismatch");
+        }
+    }
+
+    void check_failed_last() const {
+        bool rejected = false;
+        try { requests.back()->receipt(); } catch (const std::logic_error&) { rejected = true; }
+        require(rejected, "failed transport has a success receipt");
+    }
 };
 
 void run_events(Json document, const char* name, uint64_t second_finish,
@@ -148,7 +222,13 @@ void run_events(Json document, const char* name, uint64_t second_finish,
         pd_path = (root / "pd-path.json").string();
         write_json(pd_path, document["pd_path_services"]);
     }
-    PhysicalServiceFactory services(memory, (root / "binding.json").string(), 2, pd_path);
+    std::string transport_path;
+    if (pattern.transport) {
+        transport_path = (root / "transport.json").string();
+        write_json(transport_path, document["transport"]);
+    }
+    PhysicalServiceFactory services(memory, (root / "binding.json").string(), 2, pd_path,
+                                     transport_path);
     std::vector<std::unique_ptr<Network>> networks;
     std::vector<std::unique_ptr<Sys>> systems;
     for (int rank = 0; rank < 2; ++rank) {
@@ -161,7 +241,12 @@ void run_events(Json document, const char* name, uint64_t second_finish,
     }
     Completion completion;
     TaggedHandler requests[2];
-    for (int rank = 0; rank < 2; ++rank) {
+    TransportRun transport;
+    for (unsigned rank = 0; rank < pattern.requests; ++rank) {
+        if (pattern.transport) {
+            transport.issue(services, *systems[rank], rank, pattern);
+            continue;
+        }
         requests[rank].sys_id = rank;
         requests[rank].device_id = pattern.device;
         requests[rank].completion_target = &completion;
@@ -176,7 +261,15 @@ void run_events(Json document, const char* name, uint64_t second_finish,
     for (unsigned steps = 0; !events->finished(); ++steps) {
         require(steps < 100, "physical memory callbacks did not drain");
         events->proceed();
-        services.rethrow_failure();
+        try { services.rethrow_failure(); } catch (...) {
+            if (pattern.transport) transport.check_failed_last();
+            throw;
+        }
+    }
+    if (pattern.transport) {
+        transport.check(pattern, second_finish);
+        LoggerFactory::get_logger("physical-service-test")->info("PASS {}", name);
+        return;
     }
     require(completion.calls == 2, "missing or duplicate memory callback");
     require(requests[0].memory_finish_ns ==
@@ -256,6 +349,103 @@ void logical_alias(Json input) {
     }
     require(rejected, "conflicting logical alias parameters accepted");
 }
+
+Json transport_document(Json input, bool independent = false, uint64_t rate = 1'000'000'000ULL,
+                        uint64_t latency = 5) {
+    seal(input);
+    Json resources = {{{"id", "shared"}, {"bandwidth_bytes_per_second", rate}, {"latency_ns", latency}}};
+    if (independent) resources.push_back({{"id", "other"}, {"bandwidth_bytes_per_second", rate},
+                                         {"latency_ns", latency}});
+    Json wire = {{"schema_version", "transport-service-v1"},
+        {"physical_network_sha256", std::string(64, 'a')},
+        {"service_binding_digest", input["binding"]["binding_digest"]},
+        {"service_activation_id", input["binding"]["activation_id"]},
+        {"policy", "fifo_serialized_latency_v1"}, {"rounding_mode", "ceil_ns_v1"},
+        {"rank_count", 2u}, {"resources", resources}, {"links", {
+            {{"id", "out"}, {"source", "a"}, {"target", "b"}, {"resource", "shared"}},
+            {{"id", "back"}, {"source", "b"}, {"target", "a"},
+             {"resource", independent ? "other" : "shared"}}}}};
+    wire["projection_digest"] = Wire::digest(wire);
+    input["transport"] = wire;
+    return input;
+}
+
+void transport_events(const Json& golden) {
+    RequestPattern pattern;
+    pattern.transport = true;
+    pattern.bytes = 64;
+    pattern.first_finish = 69;
+    pattern.requests = 1;
+    run_events(transport_document(golden), "transport-single", 0, pattern);
+    pattern.requests = 2;
+    run_events(transport_document(golden), "transport-reverse-shared", 138, pattern);
+    run_events(transport_document(golden, true), "transport-independent", 69, pattern);
+    pattern.second_ready = 10;
+    run_events(transport_document(golden), "transport-delayed-ready", 138, pattern);
+    pattern.second_ready = 0;
+    pattern.bytes = 1;
+    pattern.first_finish = 1;
+    run_events(transport_document(golden, false, 2'000'000'000ULL, 0), "transport-ceil", 2, pattern);
+    run_events(transport_document(golden, false, 3'000'000'000ULL, 0), "transport-ceil-third", 2, pattern);
+    pattern.bytes = 64;
+    pattern.first_finish = 69;
+    pattern.second_bytes = std::numeric_limits<uint64_t>::max() - 37;
+    bool rejected = false;
+    try { run_events(transport_document(golden), "transport-queued-overflow", 0, pattern); }
+    catch (const std::overflow_error&) { rejected = true; }
+    require(rejected, "queued transport overflow was swallowed");
+}
+
+template <class Function>
+void rejects(Function function, const char* message) {
+    bool rejected = false;
+    try { function(); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, message);
+}
+
+void transport_contracts(const Json& golden) {
+    auto input = transport_document(golden);
+    const auto root = temporary_directory();
+    write_json(root / "memory.json", input["manifest"]);
+    write_json(root / "binding.json", input["binding"]);
+    const auto memory = load_memory_tier_config((root / "memory.json").string());
+    const auto physical = load_physical_service_config((root / "binding.json").string(), memory, 2);
+    const auto path = (root / "transport.json").string();
+    for (const auto& mutate : std::vector<std::function<void(Json&)>>{
+        [](Json& j) { j["resources"][0]["bandwidth_bytes_per_second"] = 0u; },
+        [](Json& j) { j["resources"][0]["bandwidth_bytes_per_second"] = -1; },
+        [](Json& j) { j["resources"][0]["latency_ns"] = true; },
+        [](Json& j) { j["resources"][0]["id"] = "hbm-0"; },
+        [](Json& j) { j["resources"].push_back(j["resources"][0]); },
+        [](Json& j) { j["links"][0]["resource"] = "absent"; },
+        [](Json& j) { j["links"][0]["resource"] = nullptr; },
+        [](Json& j) { j["links"].push_back(j["links"][0]); },
+        [](Json& j) { j["rank_count"] = 3u; },
+        [](Json& j) { j["policy"] = "fair"; },
+        [](Json& j) { j["rounding_mode"] = "floor_ns_v1"; },
+        [](Json& j) { j["service_activation_id"] = "stale"; },
+        [](Json& j) { j["extra"] = 1u; }}) {
+        auto wire = input["transport"];
+        mutate(wire);
+        wire.erase("projection_digest");
+        wire["projection_digest"] = Wire::digest(wire);
+        write_json(path, wire);
+        rejects([&] { load_transport_service_config(path, physical); }, "invalid transport wire accepted");
+    }
+    auto corrupt = input["transport"];
+    corrupt["resources"][0]["latency_ns"] = 7u;
+    write_json(path, corrupt);
+    rejects([&] { load_transport_service_config(path, physical); }, "transport digest mismatch accepted");
+    write_json(path, input["transport"]);
+    PhysicalServiceFactory services(memory, (root / "binding.json").string(), 2, "", path);
+    rejects([&] { services.transport(2, "out"); }, "unknown transport rank accepted");
+    rejects([&] { services.transport(0, "absent"); }, "unpriced link accepted");
+    TransportCompletion completion;
+    TaggedTransport zero(0, "zero", 0, completion), wrong(1, "wrong-rank", 64, completion);
+    rejects([&] { services.transport(0, "out").issue(zero); }, "zero payload accepted");
+    rejects([&] { services.transport(0, "out").issue(wrong); }, "wrong context rank accepted");
+    require(completion.calls == 0, "invalid transport request completed");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -265,6 +455,15 @@ int main(int argc, char** argv) {
         }
         LoggerFactory::init("empty");
         auto golden = Wire::read(argv[1]);
+        if (argc == 5 && std::string(argv[2]) == "--transport") {
+            golden["transport"] = Wire::read(argv[3]);
+            RequestPattern pattern;
+            pattern.transport = true;
+            pattern.bytes = 64;
+            pattern.first_finish = 69;
+            run_events(golden, "transport-python-wire", std::stoull(argv[4]), pattern);
+            return 0;
+        }
         if (argc >= 4) {
             golden["pd_path_services"] = Wire::read(argv[2]);
             RequestPattern pattern;
@@ -327,6 +526,8 @@ int main(int argc, char** argv) {
         require(queued_overflow_rejected, "asynchronous queued overflow was swallowed");
         nonzero_logical_device(golden);
         logical_alias(golden);
+        transport_events(golden);
+        transport_contracts(golden);
     } catch (const std::exception& error) {
         std::cerr << "physical service event test failed: " << error.what() << std::endl;
         return 1;
