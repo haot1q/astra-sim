@@ -43,6 +43,7 @@ int CongestionUnawareNetworkApi::sim_send(void* const buffer,
                                           void* const fun_arg) {
     // query chunk id
     const auto src = sim_comm_get_rank();
+    if (physical_) physical_->validate(src, dst, count);
     const auto chunk_id =
         CongestionUnawareNetworkApi::chunk_id_generator.create_send_chunk_id(
             tag, src, dst, count);
@@ -60,6 +61,11 @@ int CongestionUnawareNetworkApi::sim_send(void* const buffer,
         auto* const new_entry =
             callback_tracker.create_new_entry(tag, src, dst, count, chunk_id);
         new_entry->register_send_callback(msg_handler, fun_arg);
+    }
+
+    if (physical_) {
+        physical_->submit({tag, src, dst, count, chunk_id}, process_chunk_arrival);
+        return 0;
     }
 
     // create chunk

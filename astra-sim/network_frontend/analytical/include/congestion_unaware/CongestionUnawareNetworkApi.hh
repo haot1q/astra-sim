@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #pragma once
 
 #include "common/CommonNetworkApi.hh"
+#include "common/PhysicalRouteTransport.hh"
 #include <astra-network-analytical/common/Type.h>
 #include <astra-network-analytical/congestion_unaware/Topology.h>
 #include <vector>
@@ -36,6 +37,7 @@ class CongestionUnawareNetworkApi final : public CommonNetworkApi {
      * @param rank id of the API
      */
     explicit CongestionUnawareNetworkApi(int rank) noexcept;
+    void set_physical_transport(PhysicalRouteTransport* transport) { physical_ = transport; }
 
     /**
      * Implement sim_send of AstraNetworkAPI.
@@ -52,6 +54,7 @@ class CongestionUnawareNetworkApi final : public CommonNetworkApi {
   private:
     /// topology
     static std::shared_ptr<Topology> topology;
+    PhysicalRouteTransport* physical_ = nullptr;  // Run-owned; not a second network.
 };
 
 }  // namespace AstraSimAnalyticalCongestionUnaware
