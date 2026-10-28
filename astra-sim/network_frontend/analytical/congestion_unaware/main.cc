@@ -31,6 +31,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--physical-route-capability") {
+        std::cout << "message_store_forward_v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--dependency-delay-capability") {
         std::cout << "dependency-delay-v1" << std::endl;
         return 0;
@@ -96,9 +100,17 @@ int main(int argc, char* argv[]) {
         std::vector<std::unique_ptr<CongestionUnawareNetworkApi>>();
 
     const auto memory_config = load_memory_tier_config(memory_configuration);
+    const auto route_path = cmd_line_parser.get<std::string>("physical-message-routes");
+    const auto transport_path = cmd_line_parser.get<std::string>("transport-service-bindings");
+    const auto route_summary = cmd_line_parser.get<std::string>("physical-route-summary");
+    if (route_path.empty() != transport_path.empty() || route_path.empty() != route_summary.empty() ||
+        (!route_path.empty() && (!cmd_line_parser.get<std::string>("pd-path-service-bindings").empty() ||
+          workload_configuration.rfind("template-", 0) == 0))) {
+        throw std::invalid_argument("physical route flags require one Reference mode without P/D paths");
+    }
     PhysicalServiceFactory services(memory_config,
         cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count,
-        cmd_line_parser.get<std::string>("pd-path-service-bindings"));
+        cmd_line_parser.get<std::string>("pd-path-service-bindings"), transport_path);
 
     auto systems = std::vector<Sys*>();
 
@@ -122,9 +134,18 @@ int main(int argc, char* argv[]) {
         network_apis.push_back(std::move(network_api));
         systems.push_back(system);
     }
+    std::unique_ptr<PhysicalRouteTransport> physical_routes;
+    if (!route_path.empty()) {
+        physical_routes = std::make_unique<PhysicalRouteTransport>(route_path, route_summary,
+            services, systems, event_queue);
+        for (auto& network : network_apis) network->set_physical_transport(physical_routes.get());
+    }
     PdKvTransferExecutor pd_kv_executor(systems, &services, pd_network_projection(network_parser));
     PdLocalPreparationExecutor preparation_executor(systems, &services, &memory_config);
-    const auto submit_pd_kv = [&pd_kv_executor](const std::string& command) {
+    const auto submit_pd_kv = [&pd_kv_executor, &physical_routes](const std::string& command) {
+      if (physical_routes && command.rfind("pd-", 0) == 0) {
+        throw std::invalid_argument("physical routes do not support P/D commands");
+      }
       constexpr const char* cancel = "pd-path-cancel\t";
       if (command.rfind(cancel, 0) == 0) {
         pd_kv_executor.cancel_path(command.substr(std::char_traits<char>::length(cancel)));
@@ -270,8 +291,9 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
-    const auto all_systems_drained = [&systems, &pd_kv_executor, &preparation_executor]() {
-      return pd_kv_executor.drained() && preparation_executor.drained() && std::all_of(
+    const auto all_systems_drained = [&systems, &pd_kv_executor, &preparation_executor, &physical_routes]() {
+      return (!physical_routes || physical_routes->drained()) &&
+          pd_kv_executor.drained() && preparation_executor.drained() && std::all_of(
           systems.begin(), systems.end(), [](const Sys* system) {
             return system->workload->is_finished &&
                 system->memory_movement_drained();
@@ -288,7 +310,8 @@ int main(int argc, char* argv[]) {
       }
       const auto path_progress = pd_kv_executor.path_completed_count();
       const auto preparation_progress = preparation_executor.completed_count();
-      services.rethrow_failure();
+      if (physical_routes) physical_routes->rethrow_failure();
+      else services.rethrow_failure();
       bool asked_any = false;
       if(!event_queue->finished()){
         event_queue->proceed();
@@ -300,7 +323,8 @@ int main(int argc, char* argv[]) {
         clear_suppression();
       }
 
-      services.rethrow_failure();
+      if (physical_routes) physical_routes->rethrow_failure();
+      else services.rethrow_failure();
       preparation_executor.rethrow_failure();
       pd_kv_executor.rethrow_failure();
       for (const auto* system : systems) {
@@ -347,6 +371,12 @@ int main(int argc, char* argv[]) {
 
           std::string new_filename;
           std::getline(std::cin, new_filename);
+          if (physical_routes && new_filename.rfind("pd-cache-", 0) == 0) {
+            throw std::invalid_argument("physical routes do not support P/D Cache commands");
+          }
+          if (physical_routes && new_filename.rfind("template-", 0) == 0) {
+            throw std::invalid_argument("physical routes do not support Template");
+          }
 
           if (new_filename.rfind("pass", 0) == 0) {
             // Nothing to run. Do not ask again until the frontend's answer
@@ -434,6 +464,12 @@ int main(int argc, char* argv[]) {
 
           std::string new_filename;
           std::getline(std::cin, new_filename);
+          if (physical_routes && new_filename.rfind("pd-cache-", 0) == 0) {
+            throw std::invalid_argument("physical routes do not support P/D Cache commands");
+          }
+          if (physical_routes && new_filename.rfind("template-", 0) == 0) {
+            throw std::invalid_argument("physical routes do not support Template");
+          }
 
           if (new_filename.rfind("pass", 0) == 0) {
             // Nothing to run. Do not ask again until the frontend's answer
@@ -525,6 +561,10 @@ int main(int argc, char* argv[]) {
       }
     }
     // Drain asynchronous log output before publishing the terminal protocol.
+    if (physical_routes) {
+        physical_routes->rethrow_failure();
+        physical_routes->write_summary();
+    }
     AstraSim::LoggerFactory::shutdown();
     if (done){
       cout << "---------------------------" << endl;

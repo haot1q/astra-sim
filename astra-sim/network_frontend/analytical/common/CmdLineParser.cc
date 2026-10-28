@@ -29,6 +29,12 @@ void CmdLineParser::define_options() noexcept {
         cxxopts::value<std::string>()->default_value(""))(
         "pd-path-service-bindings", "P/D interface physical service binding file",
         cxxopts::value<std::string>()->default_value(""))(
+        "transport-service-bindings", "Explicit H3 transport service projection",
+        cxxopts::value<std::string>()->default_value(""))(
+        "physical-message-routes", "Explicit physical message route projection",
+        cxxopts::value<std::string>()->default_value(""))(
+        "physical-route-summary", "Fresh aggregate physical route evidence output",
+        cxxopts::value<std::string>()->default_value(""))(
         "network-configuration", "Network configuration file",
         cxxopts::value<std::string>())(
         "logging-configuration", "Logging configuration file",

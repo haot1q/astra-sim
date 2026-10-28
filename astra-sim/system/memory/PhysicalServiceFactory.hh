@@ -43,6 +43,7 @@ class PhysicalServiceFactory {
     AstraMemoryAPI* pd_interface(uint32_t rank, const std::string& interface_id) const;
     const PdPathServiceConfig& pd_path_config() const;
     TransportServiceAdapter& transport(uint32_t rank, const std::string& link_id);
+    const TransportServiceConfig& transport_configuration() const { return transport_config_; }
 
   private:
     AstraMemoryAPI* own(nlohmann::json backend, bool physical);
