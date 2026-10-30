@@ -21,6 +21,7 @@ using Json = nlohmann::json;
 namespace {
 constexpr const char* kProfile = "message_store_forward_v1";
 constexpr const char* kPropagationProfile = "message_store_forward_propagation_v1";
+constexpr const char* kPipelineProfile = "message_block_pipeline_v1";
 
 void add(Json& object, const char* key, uint64_t value) {
     const auto before = object.value(key, uint64_t{0});
@@ -76,6 +77,7 @@ struct PhysicalRouteTransport::Path : Callable {
         timing.finish_ns = receipt.finish_ns;
         timing.total_wait_ns = sum(timing.total_wait_ns, receipt.start_ns - receipt.ready_ns);
         timing.total_service_ns = sum(timing.total_service_ns, receipt.finish_ns - receipt.start_ns);
+        if (owner.pipeline_) add(owner.summary_["pipeline_counters"], "completed_block_hops", 1);
         if (input.observe_hop) input.observe_hop(receipt);
         // Both H3 callbacks must return before this request is released.
         owner.events_->schedule_event(owner.events_->get_current_time(), continue_path, this);
@@ -96,12 +98,31 @@ PhysicalRouteTransport::PhysicalRouteTransport(const std::string& path, const st
         }
     }
     auto body = Wire::read(path);
-    Wire::fields(body, {"schema_version", "timing_profile", "physical_network_sha256",
+    const bool pipeline = body.value("timing_profile", "") == kPipelineProfile;
+    Json limits;
+    if (pipeline) {
+        limits = body.at("pipeline");
+        Wire::fields(limits, {"block_bytes", "max_blocks_per_message", "max_block_hops_per_message",
+                             "max_inflight_blocks", "max_inflight_block_hops"});
+        for (const auto& value : limits.items()) {
+            if (!value.value().is_number_unsigned() || value.value().get<uint64_t>() == 0) {
+                throw std::invalid_argument("pipeline limits require positive uint64 integers");
+            }
+        }
+        pipeline_ = PipelineLimits{limits["block_bytes"], limits["max_blocks_per_message"],
+            limits["max_block_hops_per_message"], limits["max_inflight_blocks"], limits["max_inflight_block_hops"]};
+    }
+    auto fields = body;
+    if (pipeline) fields.erase("pipeline");
+    Wire::fields(fields, {"schema_version", "timing_profile", "physical_network_sha256",
         "transport_projection_digest", "service_binding_digest", "service_activation_id",
         "rank_count", "routes", "routes_digest"});
     const auto& service = services.transport_configuration();
-    const auto* profile = service.policy == TransportLatencyPolicy::Propagation
+    const auto* profile = pipeline ? kPipelineProfile : service.policy == TransportLatencyPolicy::Propagation
         ? kPropagationProfile : kProfile;
+    if (pipeline && service.policy != TransportLatencyPolicy::Propagation) {
+        throw std::invalid_argument("pipeline requires service-then-propagate policy");
+    }
     const auto digest = Wire::name(body["routes_digest"]);
     body.erase("routes_digest");
     if (body["schema_version"] != "physical-message-routes-v1" || body["timing_profile"] != profile ||
@@ -117,6 +138,12 @@ PhysicalRouteTransport::PhysicalRouteTransport(const std::string& path, const st
         {"uncalibrated", true}, {"physical_network_sha256", service.physical_network_sha256},
         {"routes_digest", digest}, {"submitted_messages", 0u}, {"completed_messages", 0u},
         {"completed_payload_bytes", 0u}, {"resources", Json::object()}};
+    if (pipeline_) {
+        summary_["pipeline"] = limits;
+        summary_["pipeline_counters"] = {{"submitted_blocks", 0u}, {"completed_blocks", 0u},
+            {"completed_block_hops", 0u}, {"continuation_callbacks", 0u}, {"completed_message_elapsed_ns", 0u},
+            {"peak_inflight_blocks", 0u}, {"peak_reserved_block_hops", 0u}};
+    }
 }
 
 PhysicalRouteTransport::~PhysicalRouteTransport() = default;
@@ -125,13 +152,22 @@ void PhysicalRouteTransport::validate(int src, int dst, uint64_t bytes) const {
     if (failure_) std::rethrow_exception(failure_);
     const auto found = routes_.find({src, dst});
     if (!bytes || found == routes_.end()) throw std::invalid_argument("missing physical route or zero payload");
-    validate_path(src, bytes, found->second);
+    if (pipeline_) {
+        const auto blocks = block_count(bytes, found->second.size());
+        check_budget(blocks, found->second.size());
+        validate_path(src, std::min(bytes, pipeline_->block_bytes), found->second);
+        const auto tail = bytes % pipeline_->block_bytes;
+        if (tail && tail != std::min(bytes, pipeline_->block_bytes)) validate_path(src, tail, found->second);
+    } else {
+        validate_path(src, bytes, found->second);
+    }
 }
 
 void PhysicalRouteTransport::submit(Key key, void (*arrival)(void*)) {
     const auto src = std::get<1>(key), dst = std::get<2>(key);
     validate(src, dst, std::get<3>(key));
     if (!arrival) throw std::invalid_argument("invalid route arrival");
+    if (pipeline_) { submit_blocks(std::move(key), arrival); return; }
     const auto bytes = std::get<3>(key);
     submit_path({static_cast<uint32_t>(src), bytes, routes_.at({src, dst}),
         [this, key = std::move(key), arrival, bytes](const TransportPathTiming&) mutable {
@@ -162,16 +198,87 @@ void PhysicalRouteTransport::validate_path(
     }
 }
 
+uint64_t PhysicalRouteTransport::block_count(uint64_t bytes, size_t hops) const {
+    return hops ? (bytes - 1) / pipeline_->block_bytes + 1 : 1;
+}
+
+void PhysicalRouteTransport::check_budget(uint64_t blocks, uint64_t hops) const {
+    if (blocks > UINT64_MAX - next_id_ || (hops && blocks > UINT64_MAX / hops)) {
+        throw std::overflow_error("pipeline ID or block-hop overflow");
+    }
+    const auto work = blocks * hops;
+    if (blocks > pipeline_->message_blocks || work > pipeline_->message_hops ||
+        paths_.size() > pipeline_->inflight_blocks || blocks > pipeline_->inflight_blocks - paths_.size() ||
+        reserved_hops_ > pipeline_->inflight_hops || work > pipeline_->inflight_hops - reserved_hops_) {
+        throw std::invalid_argument("pipeline block budget exceeded");
+    }
+}
+
+void PhysicalRouteTransport::publish(std::vector<std::unique_ptr<Path>> staged) {
+    // Validation precedes publication; host allocation failure remains terminal-abort.
+    // submitted_blocks tracks next_id_, so the checked ID bound also bounds this counter.
+    // All first-hop events share this tick.
+    for (auto& path : staged) {
+        const auto id = path->id;
+        auto* context = path.get();
+        paths_.emplace(id, std::move(path));
+        if (pipeline_) reserved_hops_ += context->input.service_link_ids.size();
+    }
+    if (pipeline_) {
+        auto& row = summary_["pipeline_counters"];
+        add(row, "submitted_blocks", staged.size());
+        row["peak_inflight_blocks"] = std::max(row["peak_inflight_blocks"].get<uint64_t>(), uint64_t(paths_.size()));
+        row["peak_reserved_block_hops"] = std::max(row["peak_reserved_block_hops"].get<uint64_t>(), reserved_hops_);
+    }
+    const auto first = next_id_;
+    next_id_ += staged.size();
+    for (uint64_t id = first; id < next_id_; ++id) {
+        events_->schedule_event(events_->get_current_time(), continue_path, paths_.at(id).get());
+    }
+}
+
+void PhysicalRouteTransport::submit_blocks(Key key, void (*arrival)(void*)) {
+    struct Message {
+        Key key;
+        uint64_t remaining, ready;
+    };
+    const auto src = std::get<1>(key), dst = std::get<2>(key);
+    const auto bytes = std::get<3>(key);
+    const auto ready = Sys::boostedTick();
+    const auto& links = routes_.at({src, dst});
+    const auto count = block_count(bytes, links.size());
+    auto message = std::make_shared<Message>(Message{std::move(key), count, ready});
+    std::vector<std::unique_ptr<Path>> staged;
+    staged.reserve(count);
+    uint64_t remaining_bytes = bytes;
+    for (uint64_t i = 0; i < count; ++i) {
+        const auto size = links.empty() ? bytes : std::min(remaining_bytes, pipeline_->block_bytes);
+        TransportPathRequest input{static_cast<uint32_t>(src), size, links,
+            [this, message, arrival, bytes](const TransportPathTiming& timing) {
+                if (--message->remaining) return;
+                arrival(&message->key);
+                add(summary_, "completed_messages", 1);
+                add(summary_, "completed_payload_bytes", bytes);
+                add(summary_["pipeline_counters"], "completed_message_elapsed_ns", timing.finish_ns - message->ready);
+                --pending_messages_;
+            }, [this](const TransportReceipt& receipt) { record(receipt); }};
+        staged.push_back(std::make_unique<Path>(*this, next_id_ + i, std::move(input), ready));
+        remaining_bytes -= size;
+    }
+    publish(std::move(staged));
+    add(summary_, "submitted_messages", 1);
+    ++pending_messages_;
+}
+
 void PhysicalRouteTransport::submit_path(TransportPathRequest input) {
     validate_path(input.rank, input.bytes, input.service_link_ids);
     if (!input.complete || next_id_ == UINT64_MAX) {
         throw std::invalid_argument("invalid path completion or ID exhaustion");
     }
-    const auto id = next_id_++;
-    auto path = std::make_unique<Path>(*this, id, std::move(input), Sys::boostedTick());
-    auto* context = path.get();
-    paths_.emplace(id, std::move(path));
-    events_->schedule_event(events_->get_current_time(), continue_path, context);
+    if (pipeline_) check_budget(1, input.service_link_ids.size());
+    std::vector<std::unique_ptr<Path>> staged;
+    staged.push_back(std::make_unique<Path>(*this, next_id_, std::move(input), Sys::boostedTick()));
+    publish(std::move(staged));
 }
 
 void PhysicalRouteTransport::advance(Path& path) {
@@ -183,6 +290,10 @@ void PhysicalRouteTransport::advance(Path& path) {
             throw std::logic_error("physical path completion timing mismatch");
         }
         path.input.complete(timing);
+        if (pipeline_) {
+            add(summary_["pipeline_counters"], "completed_blocks", 1);
+            reserved_hops_ -= path.input.service_link_ids.size();
+        }
         paths_.erase(path.id);
         return;
     }
@@ -197,7 +308,13 @@ void PhysicalRouteTransport::advance(Path& path) {
 void PhysicalRouteTransport::continue_path(void* data) {
     auto* path = static_cast<Path*>(data);
     auto& owner = path->owner;
-    try { owner.advance(*path); } catch (...) {
+    try {
+        if (owner.pipeline_) {
+            if (owner.failure_) return;
+            add(owner.summary_["pipeline_counters"], "continuation_callbacks", 1);
+        }
+        owner.advance(*path);
+    } catch (...) {
         if (!owner.failure_) owner.failure_ = std::current_exception();
     }
 }
@@ -230,10 +347,19 @@ void PhysicalRouteTransport::rethrow_failure() {
     }
 }
 
+void PhysicalRouteTransport::abort(std::exception_ptr failure) {
+    if (!failure_) failure_ = std::move(failure);
+    write_summary();
+}
+
 void PhysicalRouteTransport::write_summary() {
     if (summary_written_) return;
     summary_["status"] = failure_ ? "failed" : drained() ? "completed" : "incomplete";
     summary_["pending_messages"] = pending_messages_;
+    if (pipeline_) {
+        summary_["pipeline_counters"]["inflight_blocks"] = paths_.size();
+        summary_["pipeline_counters"]["reserved_block_hops"] = reserved_hops_;
+    }
     std::ofstream stream(summary_path_);
     stream << summary_.dump(2) << '\n';
     stream.close();
