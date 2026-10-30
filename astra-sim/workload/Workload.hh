@@ -87,6 +87,12 @@ class Workload : public Callable {
     std::queue<PendingWorkload> pending_workloads;
 
   private:
+    void initialize_collective_scopes(const std::string& filename);
+    CommunicatorGroup* prepare_collective_scope(
+        const std::shared_ptr<Chakra::ETFeederNode>& node,
+        std::vector<bool>& dimensions);
+    std::unordered_map<std::string, std::unique_ptr<CommunicatorGroup>> collective_scopes_;
+    bool scoped_collectives_ = false;
     void issue_dependency_delay(
         const std::shared_ptr<Chakra::ETFeederNode>& node, uint64_t duration_ns);
     std::unordered_set<uint64_t> pending_dependency_delays_;

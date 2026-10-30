@@ -98,6 +98,14 @@ endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     if(BUILD_TESTING)
+        add_executable(AstraSim_CollectiveScope_Test tests/CollectiveScopeIdentityTest.cc
+            congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+        target_link_libraries(AstraSim_CollectiveScope_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
+        target_include_directories(AstraSim_CollectiveScope_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
+        add_test(NAME AstraSim_CollectiveScope_Test COMMAND AstraSim_CollectiveScope_Test
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json)
         add_executable(AstraSim_MemoryTransportAdapter_Test tests/MemoryTransportAdapterTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
         target_link_libraries(AstraSim_MemoryTransportAdapter_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
