@@ -17,6 +17,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/PdPathServiceConfig.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/TransportServiceAdapter.hh"
+#include "astra-sim/system/memory/MemoryTransportAdapter.hh"
 
 namespace Analytical { class AnalyticalMemory; }
 
@@ -34,7 +35,8 @@ class PhysicalServiceFactory {
     PhysicalServiceFactory(const MemoryTierConfigSet& memory,
                            const std::string& binding_path, uint32_t rank_count,
                            const std::string& pd_path_binding_path = "",
-                           const std::string& transport_path = "");
+                           const std::string& transport_path = "",
+                           const std::string& memory_transport_path = "");
     ~PhysicalServiceFactory();
     const RankServiceBindings& at(uint32_t rank) const;
     const ServiceBindingIdentity& identity() const;
@@ -44,6 +46,9 @@ class PhysicalServiceFactory {
     const PdPathServiceConfig& pd_path_config() const;
     TransportServiceAdapter& transport(uint32_t rank, const std::string& link_id);
     const TransportServiceConfig& transport_configuration() const { return transport_config_; }
+    void attach_transport_path_api(TransportPathAPI& path);
+    bool memory_transport_drained() const;
+    void write_memory_transport_summary(const std::string& path, bool failed) const;
 
   private:
     AstraMemoryAPI* own(nlohmann::json backend, bool physical);
@@ -55,6 +60,8 @@ class PhysicalServiceFactory {
     PhysicalServiceConfig config_;
     PdPathServiceConfig pd_config_;
     TransportServiceConfig transport_config_;
+    MemoryTransportConfig memory_transport_config_;
+    std::vector<std::unique_ptr<MemoryTransportAdapter>> memory_transports_;
     bool native_;
     std::vector<std::unique_ptr<Analytical::AnalyticalMemory>> memories_;
     std::map<std::string, AstraMemoryAPI*> physical_;

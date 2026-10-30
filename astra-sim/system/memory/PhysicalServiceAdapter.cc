@@ -47,6 +47,8 @@ void PhysicalServiceAdapter::issue(
             throw std::invalid_argument("invalid physical memory operation");
         }
         handler->service_device_id = 0;
+        handler->memory_total_wait_ns.reset();
+        handler->memory_total_service_ns.reset();
         auto physical_request = request;
         physical_request.rounding = rounding_;
         devices_.at(handler->device_id)->issue(physical_request, handler);

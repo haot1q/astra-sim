@@ -33,6 +33,8 @@ struct TransportPathRequest {
 class TransportPathAPI {
   public:
     virtual ~TransportPathAPI() = default;
+    virtual void validate_path(uint32_t rank, uint64_t bytes,
+                               const std::vector<std::string>& links) const = 0;
     virtual void submit_path(TransportPathRequest request) = 0;
     virtual bool drained() const = 0;
     virtual void rethrow_failure() = 0;

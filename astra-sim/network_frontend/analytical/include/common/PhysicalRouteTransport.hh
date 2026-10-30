@@ -31,10 +31,10 @@ class PhysicalRouteTransport : public AstraSim::TransportPathAPI {
     bool drained() const override;
     void rethrow_failure() override;
     void write_summary();
+    void validate_path(uint32_t rank, uint64_t bytes, const std::vector<std::string>& links) const override;
 
   private:
     struct Path;
-    void validate_path(uint32_t rank, uint64_t bytes, const std::vector<std::string>& links) const;
     void advance(Path& path);
     void record(const AstraSim::TransportReceipt& receipt);
     static void continue_path(void* data);

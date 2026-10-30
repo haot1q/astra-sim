@@ -4,10 +4,12 @@ LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
+#include "astra-sim/system/memory/MemoryCompletionTiming.hh"
 
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -758,14 +760,10 @@ void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
     if (data == nullptr) {
         throw std::invalid_argument("invalid memory movement callback data");
     }
-    auto* movement = static_cast<MovementHandlerData*>(data);
+    auto movement = std::unique_ptr<MovementHandlerData>(static_cast<MovementHandlerData*>(data));
     const std::string event_id = movement->event_id;
-    if (!(movement->memory_ready_ns <= movement->memory_start_ns &&
-          movement->memory_start_ns <= movement->memory_finish_ns &&
-          movement->memory_finish_ns == Sys::boostedTick())) {
-        delete movement;
-        throw std::logic_error("invalid analytical memory endpoint timing");
-    }
+    const auto [wait, service] = memory_completion_timing(*movement, Sys::boostedTick(),
+                                                        movement->stage == MovementStage::Intermediate);
     auto& submission = submissions_.at(event_id);
     const auto stage = movement->stage;
     const auto segment_index = movement->segment_index;
@@ -788,7 +786,6 @@ void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
         }
     } else {
         if (segment_index != submission.next_segment_index) {
-            delete movement;
             throw std::logic_error(
                 "movement segment completion arrived out of order");
         }
@@ -797,12 +794,10 @@ void MemoryMovementExecutor::complete_stage(EventType type, CallData* data) {
             submission.active_segment_start_ns = movement->memory_start_ns;
         }
         submission.active_segment_billed_bytes += billed_bytes;
-        submission.active_segment_queue_wait_ns +=
-            movement->memory_start_ns - movement->memory_ready_ns;
-        submission.active_segment_service_ns +=
-            movement->memory_finish_ns - movement->memory_start_ns;
+        submission.active_segment_queue_wait_ns += wait;
+        submission.active_segment_service_ns += service;
     }
-    delete movement;
+    movement.reset();
     if (stage == MovementStage::SourceEndpoint) {
         start_next_segment(event_id);
     } else if (stage == MovementStage::DestinationEndpoint) {

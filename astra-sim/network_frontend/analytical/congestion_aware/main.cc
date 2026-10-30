@@ -21,6 +21,7 @@ LICENSE file in the root directory of this source tree.
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 using namespace AstraSim;
@@ -38,6 +39,10 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     auto cmd_line_parser = CmdLineParser(argv[0]);
     cmd_line_parser.parse(argc, argv);
+    if (!cmd_line_parser.get<std::string>("physical-memory-routes").empty() ||
+        !cmd_line_parser.get<std::string>("memory-transport-summary").empty()) {
+        throw std::invalid_argument("memory transport supports only congestion-unaware analytical frontend");
+    }
 
     // Get command line arguments
     const auto workload_configuration =
