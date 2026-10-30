@@ -770,7 +770,7 @@ DataSet* Sys::generate_all_reduce(uint64_t size,
                                   vector<bool> involved_dimensions,
                                   CommunicatorGroup* communicator_group,
                                   int explicit_priority) {
-    if (communicator_group == nullptr) {
+    if (communicator_group == nullptr || communicator_group->identity_only()) {
         return generate_collective(size, logical_topologies["AllReduce"],
                                    all_reduce_implementation_per_dimension,
                                    involved_dimensions, ComType::All_Reduce,
@@ -789,7 +789,7 @@ DataSet* Sys::generate_all_to_all(uint64_t size,
                                   vector<bool> involved_dimensions,
                                   CommunicatorGroup* communicator_group,
                                   int explicit_priority) {
-    if (communicator_group == nullptr) {
+    if (communicator_group == nullptr || communicator_group->identity_only()) {
         return generate_collective(size, logical_topologies["AllToAll"],
                                    all_to_all_implementation_per_dimension,
                                    involved_dimensions, ComType::All_to_All,
@@ -808,7 +808,7 @@ DataSet* Sys::generate_all_gather(uint64_t size,
                                   vector<bool> involved_dimensions,
                                   CommunicatorGroup* communicator_group,
                                   int explicit_priority) {
-    if (communicator_group == nullptr) {
+    if (communicator_group == nullptr || communicator_group->identity_only()) {
         return generate_collective(size, logical_topologies["AllGather"],
                                    all_gather_implementation_per_dimension,
                                    involved_dimensions, ComType::All_Gather,
@@ -827,7 +827,7 @@ DataSet* Sys::generate_reduce_scatter(uint64_t size,
                                       vector<bool> involved_dimensions,
                                       CommunicatorGroup* communicator_group,
                                       int explicit_priority) {
-    if (communicator_group == nullptr) {
+    if (communicator_group == nullptr || communicator_group->identity_only()) {
         return generate_collective(size, logical_topologies["ReduceScatter"],
                                    reduce_scatter_implementation_per_dimension,
                                    involved_dimensions, ComType::Reduce_Scatter,
@@ -1087,7 +1087,7 @@ DataSet* Sys::generate_collective(
         if (vect.size() > 0) {
             int stream_id = num_streams++;
             if (communicator_group != nullptr) {
-                stream_id = communicator_group->num_streams++;
+                stream_id = communicator_group->next_stream_id();
             }
             StreamBaseline* newStream =
                 new StreamBaseline(this, dataset, stream_id, vect, pri);

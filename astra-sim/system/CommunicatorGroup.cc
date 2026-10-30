@@ -6,6 +6,9 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/CommunicatorGroup.hh"
 
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 #include "astra-sim/system/CollectivePlan.hh"
 #include "astra-sim/system/Sys.hh"
@@ -30,6 +33,49 @@ CommunicatorGroup::~CommunicatorGroup() {
     }
 }
 
+CommunicatorGroup::CommunicatorGroup(ScopeIdentity scope,
+                                     std::vector<int> involved_NPUs)
+    : involved_NPUs(std::move(involved_NPUs)), num_streams(0), id(0),
+      generator(nullptr), scope_(scope) {
+    scoped_stream_id(scope, 0);
+    auto& members = this->involved_NPUs;
+    std::sort(members.begin(), members.end());
+    if (members.empty() || members.front() < 0 ||
+        std::adjacent_find(members.begin(), members.end()) != members.end()) {
+        throw std::invalid_argument("collective scope requires unique nonnegative members");
+    }
+}
+
+bool CommunicatorGroup::identity_only() const {
+    return scope_.has_value();
+}
+
+int CommunicatorGroup::scoped_stream_id(ScopeIdentity scope, uint64_t sequence) {
+    constexpr uint64_t width = Sys::FrontEndSendRecvType::RENDEZVOUS -
+                               Sys::FrontEndSendRecvType::COLLECTIVE;
+    if (!scope.group_count || scope.group_count > width ||
+        scope.group_index >= scope.group_count ||
+        sequence > (width - 1 - scope.group_index) / scope.group_count) {
+        throw std::invalid_argument("collective scope identity exhausted or invalid");
+    }
+    return static_cast<int>(scope.group_index + scope.group_count * sequence);
+}
+
+void CommunicatorGroup::require_streams(uint64_t count) const {
+    if (!scope_) throw std::invalid_argument("collective scope preflight requires named mode");
+    if (count == 0 || count - 1 > std::numeric_limits<uint64_t>::max() - scope_sequence_) {
+        throw std::invalid_argument("collective scope stream count is invalid");
+    }
+    scoped_stream_id(*scope_, scope_sequence_ + count - 1);
+}
+
+int CommunicatorGroup::next_stream_id() {
+    if (!scope_) return num_streams++;
+    const int result = scoped_stream_id(*scope_, scope_sequence_);
+    ++scope_sequence_;
+    return result;
+}
+
 void CommunicatorGroup::set_id(int id) {
     assert(id > 0);
     this->id = id;
@@ -37,6 +83,9 @@ void CommunicatorGroup::set_id(int id) {
 }
 
 CollectivePlan* CommunicatorGroup::get_collective_plan(ComType comm_type) {
+    if (identity_only()) {
+        throw std::logic_error("identity-only collective scope cannot replace topology");
+    }
     if (comm_plans.find(comm_type) != comm_plans.end()) {
         return comm_plans[comm_type];
     }

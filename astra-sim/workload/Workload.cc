@@ -15,6 +15,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
 #include "astra-sim/system/memory/UcieTransport.hh"
+#include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include "astra-sim/workload/IndexedTemplateWorkloadFeeder.hh"
 #include "astra-sim/workload/IndexedTemplateProgramFeeder.hh"
 #include "astra-sim/workload/TemplateWorkloadFeeder.hh"
@@ -22,8 +23,10 @@ LICENSE file in the root directory of this source tree.
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -197,16 +200,35 @@ Workload::~Workload() {
 }
 
 void Workload::initialize_comm_group(string comm_group_filename) {
-    // communicator group input file is not given
-    if (comm_group_filename.find("empty") != std::string::npos) {
+    const bool legacy_empty = comm_group_filename.find("empty") != string::npos;
+    ifstream inFile(comm_group_filename);
+    if (legacy_empty && !inFile) {
         comm_group = nullptr;
         return;
     }
-
-    ifstream inFile;
-    json j;
-    inFile.open(comm_group_filename);
-    inFile >> j;
+    // Remember explicit envelopes before duplicate keys can overwrite them.
+    bool named = false;
+    string top_key;
+    auto observe = [&](int depth, json::parse_event_t event, json& value) {
+        if (depth != 1) return true;
+        if (event == json::parse_event_t::key) top_key = value.get<string>();
+        if ((top_key == "schema" &&
+             (event == json::parse_event_t::object_start ||
+              (event == json::parse_event_t::value && !value.is_array()))) ||
+            (top_key == "groups" && event == json::parse_event_t::object_start)) {
+            named = true;
+        }
+        return true;
+    };
+    auto j = json::parse(inFile, observe);
+    if (named) {
+        initialize_collective_scopes(comm_group_filename);
+        return;
+    }
+    if (legacy_empty) {
+        comm_group = nullptr;
+        return;
+    }
 
     for (json::iterator it = j.begin(); it != j.end(); ++it) {
         bool in_comm_group = false;
@@ -227,6 +249,155 @@ void Workload::initialize_comm_group(string comm_group_filename) {
             // they want to communicate with each other
         }
     }
+}
+
+void Workload::initialize_collective_scopes(const string& filename) {
+    const auto raw = ServiceBindingJson::read(filename);
+    ServiceBindingJson::fields(raw, {"schema", "groups"});
+    const auto& groups = raw["groups"];
+    if (raw["schema"] != "collective-scopes-v1" || !groups.is_object() || groups.empty()) {
+        throw invalid_argument("invalid collective scope configuration");
+    }
+    CommunicatorGroup::scoped_stream_id({0, groups.size()}, 0);
+    if (sys->inter_dimension_scheduling != InterDimensionScheduling::Ascending ||
+        sys->queues_per_dim.empty() ||
+        any_of(sys->queues_per_dim.begin(), sys->queues_per_dim.end(),
+               [](int queues) { return queues != 1; })) {
+        throw invalid_argument("collective scopes require Ascending and one queue per dimension");
+    }
+    for (auto type : {ComType::All_Reduce, ComType::All_Gather,
+                      ComType::Reduce_Scatter, ComType::All_to_All}) {
+        const auto implementations = sys->get_collective_implementation(type);
+        if (implementations.empty() ||
+            any_of(implementations.begin(), implementations.end(), [](const auto* impl) {
+                return !impl || impl->type != CollectiveImplType::Ring;
+            })) {
+            throw invalid_argument("collective scopes require original multidimensional ring");
+        }
+    }
+    decltype(collective_scopes_) prepared;
+    uint64_t index = 0;
+    for (auto it = groups.begin(); it != groups.end(); ++it, ++index) {
+        if (it.key().empty() || !it.value().is_array()) {
+            throw invalid_argument("collective scope name and members are invalid");
+        }
+        vector<int> members;
+        for (const auto& rank : it.value()) {
+            if (!rank.is_number_unsigned() || rank.get<uint64_t>() >= sys->total_nodes) {
+                throw invalid_argument("collective scope member is outside actual topology");
+            }
+            members.push_back(rank.get<int>());
+        }
+        auto group = make_unique<CommunicatorGroup>(
+            CommunicatorGroup::ScopeIdentity{index, groups.size()}, std::move(members));
+        if (binary_search(group->involved_NPUs.begin(), group->involved_NPUs.end(), sys->id)) {
+            prepared.emplace(it.key(), std::move(group));
+        }
+    }
+    collective_scopes_ = std::move(prepared);
+    scoped_collectives_ = true;
+}
+
+namespace {
+const ChakraProtoMsg::AttributeProto& collective_attribute(
+        const shared_ptr<Chakra::ETFeederNode>& node, const string& name) {
+    const ChakraProtoMsg::AttributeProto* result = nullptr;
+    for (const auto& attr : node->getChakraNode()->attr()) {
+        if (attr.name() != name) continue;
+        if (result) throw invalid_argument("duplicate collective scope attribute: " + name);
+        result = &attr;
+    }
+    if (!result) throw invalid_argument("missing collective scope attribute: " + name);
+    return *result;
+}
+
+ComType scope_operation(const shared_ptr<Chakra::ETFeederNode>& node) {
+    const auto& type = collective_attribute(node, "comm_type");
+    if (!type.has_int64_val()) throw invalid_argument("invalid scoped collective type");
+    switch (type.int64_val()) {
+        case ChakraCollectiveCommType::ALL_REDUCE: return ComType::All_Reduce;
+        case ChakraCollectiveCommType::ALL_GATHER: return ComType::All_Gather;
+        case ChakraCollectiveCommType::REDUCE_SCATTER: return ComType::Reduce_Scatter;
+        case ChakraCollectiveCommType::ALL_TO_ALL: return ComType::All_to_All;
+        default: throw invalid_argument("unsupported scoped collective operation");
+    }
+}
+
+void require_cartesian_members(Sys& sys, ComType operation, const vector<bool>& mask,
+                               const vector<int>& members) {
+    auto* topology = sys.get_logical_topology(operation);
+    const int dimensions = topology->get_num_of_dimensions();
+    if (mask.size() != static_cast<size_t>(dimensions)) {
+        throw invalid_argument("collective scope mask must cover actual dimensions");
+    }
+    vector<int> sizes;
+    uint64_t product = 1;
+    for (int dimension = 0; dimension < dimensions; ++dimension) {
+        const int size = topology->get_num_of_nodes_in_dimension(dimension);
+        if (size <= 0 || product > static_cast<uint64_t>(sys.total_nodes) / size) {
+            throw invalid_argument("collective scope topology dimensions are invalid");
+        }
+        sizes.push_back(size);
+        product *= size;
+    }
+    if (product != static_cast<uint64_t>(sys.total_nodes)) {
+        throw invalid_argument("collective scope topology does not cover actual ranks");
+    }
+    vector<int> expected;
+    for (int rank = 0; rank < sys.total_nodes; ++rank) {
+        int local = sys.id, candidate = rank;
+        bool included = true;
+        for (int dimension = 0; dimension < dimensions; ++dimension) {
+            if (!mask[dimension] && local % sizes[dimension] != candidate % sizes[dimension]) {
+                included = false;
+                break;
+            }
+            local /= sizes[dimension];
+            candidate /= sizes[dimension];
+        }
+        if (included) expected.push_back(rank);
+    }
+    if (expected.size() < 2 || expected != members) {
+        throw invalid_argument("collective scope members do not match original dimension mask");
+    }
+}
+
+uint64_t scoped_stream_count(Sys& sys, const shared_ptr<Chakra::ETFeederNode>& node,
+                             ComType operation) {
+    const auto& raw_size = collective_attribute(node, "comm_size");
+    if (!raw_size.has_int64_val() || raw_size.int64_val() <= 0 ||
+        sys.preferred_dataset_splits <= 0 || sys.total_nodes <= 0) {
+        throw invalid_argument("invalid scoped collective size or splits");
+    }
+    uint64_t size = static_cast<uint64_t>(raw_size.int64_val());
+    // Reuse the original minimum-chunk rule without mutating the ET or Sys.
+    const uint64_t chunk = sys.determine_chunk_size(size, operation);
+    if (!chunk) throw invalid_argument("scoped collective chunk size is zero");
+    const uint64_t streams = size / chunk + static_cast<uint64_t>(size % chunk != 0);
+    if (streams > static_cast<uint64_t>(numeric_limits<int>::max())) {
+        throw invalid_argument("scoped collective stream count exceeds original DataSet range");
+    }
+    return streams;
+}
+}  // namespace
+
+CommunicatorGroup* Workload::prepare_collective_scope(
+        const shared_ptr<Chakra::ETFeederNode>& node, vector<bool>& dimensions) {
+    const auto& name = collective_attribute(node, "pg_name");
+    const auto& mask = collective_attribute(node, "involved_dim");
+    if (!name.has_string_val() || name.string_val().empty() || !mask.has_bool_list() ||
+        node->is_cpu_op()) {
+        throw invalid_argument("invalid collective scope name or dimension attributes");
+    }
+    auto found = collective_scopes_.find(name.string_val());
+    if (found == collective_scopes_.end()) {
+        throw invalid_argument("unknown collective scope or rank is not a member");
+    }
+    dimensions.assign(mask.bool_list().values().begin(), mask.bool_list().values().end());
+    const auto operation = scope_operation(node);
+    require_cartesian_members(*sys, operation, dimensions, found->second->involved_NPUs);
+    found->second->require_streams(scoped_stream_count(*sys, node, operation));
+    return found->second.get();
 }
 
 void Workload::issue_dep_free_nodes() {
@@ -530,11 +701,15 @@ void Workload::issue_comp(shared_ptr<Chakra::ETFeederNode> node) {
 }
 
 void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
-    hw_resource->occupy(node);
-
+    const bool named = scoped_collectives_ && node->type() == ChakraNodeType::COMM_COLL_NODE;
+    if (!named) hw_resource->occupy(node);
+    CommunicatorGroup* selected_group = comm_group;
     vector<bool> involved_dim;
 
-    if (node->has_other_attr("involved_dim")) {
+    if (named) {
+        selected_group = prepare_collective_scope(node, involved_dim);
+        hw_resource->occupy(node);
+    } else if (node->has_other_attr("involved_dim")) {
         const ChakraProtoMsg::AttributeProto& attr =
             node->get_other_attr("involved_dim");
 
@@ -567,7 +742,7 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
         if (node->comm_type() == ChakraCollectiveCommType::ALL_REDUCE) {
             DataSet* fp =
                 sys->generate_all_reduce(node->comm_size(), involved_dim,
-                                         comm_group, node->comm_priority());
+                                         selected_group, node->comm_priority());
             collective_comm_node_id_map[fp->my_id] = node->id();
             collective_comm_wrapper_map[fp->my_id] = fp;
             fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
@@ -575,7 +750,7 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
         } else if (node->comm_type() == ChakraCollectiveCommType::ALL_TO_ALL) {
             DataSet* fp =
                 sys->generate_all_to_all(node->comm_size(), involved_dim,
-                                         comm_group, node->comm_priority());
+                                         selected_group, node->comm_priority());
             collective_comm_node_id_map[fp->my_id] = node->id();
             collective_comm_wrapper_map[fp->my_id] = fp;
             fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
@@ -583,7 +758,7 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
         } else if (node->comm_type() == ChakraCollectiveCommType::ALL_GATHER) {
             DataSet* fp =
                 sys->generate_all_gather(node->comm_size(), involved_dim,
-                                         comm_group, node->comm_priority());
+                                         selected_group, node->comm_priority());
             collective_comm_node_id_map[fp->my_id] = node->id();
             collective_comm_wrapper_map[fp->my_id] = fp;
             fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
@@ -592,7 +767,7 @@ void Workload::issue_comm(shared_ptr<Chakra::ETFeederNode> node) {
                    ChakraCollectiveCommType::REDUCE_SCATTER) {
             DataSet* fp =
                 sys->generate_reduce_scatter(node->comm_size(), involved_dim,
-                                             comm_group, node->comm_priority());
+                                             selected_group, node->comm_priority());
             collective_comm_node_id_map[fp->my_id] = node->id();
             collective_comm_wrapper_map[fp->my_id] = fp;
             fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
