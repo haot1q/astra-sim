@@ -20,10 +20,10 @@ class TransportServiceAdapter;
 
 struct TransportReceipt {
     std::string request_id, link_id, resource_id;
-    uint64_t payload_bytes, ready_ns, start_ns, finish_ns;
+    uint64_t payload_bytes, ready_ns, start_ns, finish_ns, release_ns;
 };
 
-// Caller owns this context until both original callbacks drain. No copy/reuse.
+// Caller owns this context through queue release and final arrival. No copy/reuse.
 class TransportRequest : public WorkloadLayerHandlerData, public Callable {
   public:
     TransportRequest(uint32_t rank, std::string id, uint64_t bytes, Callable& completion);
@@ -38,6 +38,9 @@ class TransportRequest : public WorkloadLayerHandlerData, public Callable {
     const uint64_t bytes_;
     Callable& completion_;
     TransportServiceAdapter* service_ = nullptr;  // Factory-owned, non-owning.
+    enum class Phase { Service, Propagation, Complete, Failed };
+    Phase phase_ = Phase::Service;
+    uint64_t finish_ns_ = 0;
     bool completed_ = false;
 };
 
@@ -45,7 +48,7 @@ class TransportRequest : public WorkloadLayerHandlerData, public Callable {
 class TransportServiceAdapter {
   public:
     TransportServiceAdapter(uint32_t rank, TransportLink link, TransportResource resource,
-                            PhysicalServiceAdapter& adapter);
+                            PhysicalServiceAdapter& adapter, TransportLatencyPolicy policy);
     void set_sys(Sys* sys);
     void issue(TransportRequest& request);
     void rethrow_failure() const;
@@ -56,6 +59,8 @@ class TransportServiceAdapter {
     TransportLink link_;
     BandwidthResource service_time_;
     uint64_t latency_ns_;
+    TransportLatencyPolicy policy_;
+    Sys* sys_ = nullptr;  // Original event owner; no private clock or queue.
     PhysicalServiceAdapter& adapter_;
     std::exception_ptr failure_;
 };

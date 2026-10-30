@@ -36,7 +36,8 @@ PhysicalServiceFactory::PhysicalServiceFactory(
             if (physical_.count(ref)) throw std::invalid_argument("transport resource ID collision");
             physical_.emplace(ref, own({
                 {"memory-type", "MEMORY_POOL"}, {"memory-location", "REMOTE_MEMORY"},
-                {"num-devices", 1u}, {"mem-latency", resource.latency_ns},
+                {"num-devices", 1u}, {"mem-latency",
+                    transport_config_.policy == TransportLatencyPolicy::Propagation ? 0 : resource.latency_ns},
                 {"bandwidth-resource", bandwidth_resource_config_to_json(resource.bandwidth)}}, true));
         }
     } else {
@@ -156,7 +157,7 @@ TransportServiceAdapter& PhysicalServiceFactory::transport(
         adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(rank,
             std::vector<AstraMemoryAPI*>{physical_.at(link->second.resource)}, MemoryTimeRounding::Ceil));
         transports_.emplace(key, std::make_unique<TransportServiceAdapter>(rank, link->second,
-            transport_config_.resources.at(link->second.resource), *adapters_.back()));
+            transport_config_.resources.at(link->second.resource), *adapters_.back(), transport_config_.policy));
     }
     return *transports_.at(key);
 }

@@ -15,6 +15,8 @@ LICENSE file in the root directory of this source tree.
 
 namespace AstraSim {
 
+enum class TransportLatencyPolicy { Serialized, Propagation };
+
 struct TransportResource {
     BandwidthResourceConfig bandwidth;
     uint64_t latency_ns;
@@ -26,6 +28,7 @@ struct TransportLink {
 
 struct TransportServiceConfig {
     std::string physical_network_sha256, projection_digest;
+    TransportLatencyPolicy policy = TransportLatencyPolicy::Serialized;
     std::map<std::string, TransportResource> resources;
     std::map<std::string, TransportLink> links;
 };

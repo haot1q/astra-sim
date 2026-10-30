@@ -54,16 +54,16 @@ void empty_et(const std::filesystem::path& root, const Json& fixture, int rank) 
     stream.write(metadata);
 }
 
-void write_transport(const std::filesystem::path& root, const Json& binding) {
+void write_transport(const std::filesystem::path& root, const Json& binding, bool propagation) {
     Json transport = {{"schema_version", "transport-service-v1"},
         {"physical_network_sha256", std::string(64, 'a')},
         {"service_binding_digest", binding["binding_digest"]},
         {"service_activation_id", binding["activation_id"]},
-        {"policy", "fifo_serialized_latency_v1"}, {"rounding_mode", "ceil_ns_v1"},
+        {"policy", propagation ? "fifo_service_then_propagate_v1" : "fifo_serialized_latency_v1"}, {"rounding_mode", "ceil_ns_v1"},
         {"rank_count", 2u}, {"resources", Json::array()}, {"links", Json::array()}};
     for (const auto& id : {"a", "b", "c"}) {
         transport["resources"].push_back({{"id", id},
-            {"bandwidth_bytes_per_second", 1'000'000'000ULL}, {"latency_ns", 0u}});
+            {"bandwidth_bytes_per_second", 1'000'000'000ULL}, {"latency_ns", propagation ? 100u : 0u}});
         transport["links"].push_back({{"id", id}, {"source", "from"},
             {"target", "to"}, {"resource", id}});
     }
@@ -72,7 +72,7 @@ void write_transport(const std::filesystem::path& root, const Json& binding) {
     transport["projection_digest"] = Wire::digest(transport);
     write_json(root / "transport.json", transport);
     Json routes = {{"schema_version", "physical-message-routes-v1"},
-        {"timing_profile", "message_store_forward_v1"},
+        {"timing_profile", propagation ? "message_store_forward_propagation_v1" : "message_store_forward_v1"},
         {"physical_network_sha256", transport["physical_network_sha256"]},
         {"transport_projection_digest", transport["projection_digest"]},
         {"service_binding_digest", binding["binding_digest"]},
@@ -92,7 +92,7 @@ struct Fixture {
     std::vector<Sys*> systems;
     std::unique_ptr<Paths> paths;
 
-    explicit Fixture(const Json& golden) {
+    explicit Fixture(const Json& golden, bool propagation = false) {
         auto pattern = (std::filesystem::temp_directory_path() / "physical-path-XXXXXX").string();
         std::vector<char> buffer(pattern.begin(), pattern.end());
         buffer.push_back('\0');
@@ -107,7 +107,7 @@ struct Fixture {
             {"boost-mode", 0u}, {"all-reduce-implementation", {"ring"}},
             {"all-gather-implementation", {"ring"}}, {"reduce-scatter-implementation", {"ring"}},
             {"all-to-all-implementation", {"ring"}}});
-        write_transport(root, golden["binding"]);
+        write_transport(root, golden["binding"], propagation);
         {
             std::ofstream stream(root / "network.yml");
             stream << "topology: [FullyConnected]\nnpus_count: [2]\nbandwidth: [1000.0]\nlatency: [0.0]\n";
@@ -195,6 +195,35 @@ void delayed_and_empty(Fixture& fixture) {
     timing(completed[2], {7, 17, 27, 10, 10});
 }
 
+void propagation_paths(Fixture& fixture, bool snapshot = false) {
+    std::vector<TransportPathTiming> completed;
+    fixture.paths->submit_path({0, 4, {"a", "b"},
+        [&](const auto& row) { completed.push_back(row); }, {}});
+    fixture.paths->submit({0, 0, 1, 4, 0}, [](void*) {});
+    auto pending = [&] {
+        require(!fixture.paths->drained() && completed.empty(), "propagating path drained early");
+        if (!snapshot) return;
+        fixture.paths->write_summary();
+        const auto summary = Wire::read((fixture.root / "summary.json").string());
+        require(summary["completed_messages"] == 0 && summary["pending_messages"] == 1 &&
+                summary["resources"].empty(), "propagation counted as completed bytes");
+    };
+    fixture.events->schedule_event(9, [](void* data) {
+        (*static_cast<decltype(pending)*>(data))();
+    }, &pending);
+    fixture.drain();
+    require(fixture.paths->drained() && completed.size() == 1, "propagation did not drain");
+    timing(completed[0], {0, 0, 208, 0, 208});  // Whole-message arrival precedes the second hop.
+    if (snapshot) return;  // The original summary owner publishes only once.
+    fixture.paths->write_summary();
+    const auto summary = Wire::read((fixture.root / "summary.json").string());
+    const auto& resource = summary["resources"]["a"];
+    require(summary["completed_messages"] == 1 && resource["queue_wait_ns"] == 4 &&
+            resource["service_ns"] == 104 && resource["busy_ns"] == 4 &&
+            resource["propagation_ns"] == 100 && resource["completed_payload_bytes"] == 4,
+            "propagation summary conflated occupancy and arrival");
+}
+
 void invalid_paths(Fixture& fixture) {
     unsigned calls = 0;
     const auto save = [&](const auto&) { ++calls; };
@@ -236,10 +265,13 @@ int main(int argc, char** argv) {
     try {
         require(argc == 3, "expected golden fixture and test mode");
         LoggerFactory::init("empty");
-        Fixture fixture(Wire::read(argv[1]));
         const std::string mode = argv[2];
+        Fixture fixture(Wire::read(argv[1]), mode.find("propagation") == 0);
         if (mode == "paths") paths_and_messages(fixture);
         else if (mode == "delayed") delayed_and_empty(fixture);
+        else if (mode == "propagation") propagation_paths(fixture);
+        else if (mode == "propagation-pending") propagation_paths(fixture, true);
+        else if (mode == "propagation-failure") failed_callback(fixture, false);
         else if (mode == "invalid") invalid_paths(fixture);
         else if (mode == "observer-failure") failed_callback(fixture, true);
         else if (mode == "completion-failure") failed_callback(fixture, false);

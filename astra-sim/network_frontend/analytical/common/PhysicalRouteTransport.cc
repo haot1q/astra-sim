@@ -20,6 +20,7 @@ namespace Wire = ServiceBindingJson;
 using Json = nlohmann::json;
 namespace {
 constexpr const char* kProfile = "message_store_forward_v1";
+constexpr const char* kPropagationProfile = "message_store_forward_propagation_v1";
 
 void add(Json& object, const char* key, uint64_t value) {
     const auto before = object.value(key, uint64_t{0});
@@ -68,7 +69,7 @@ struct PhysicalRouteTransport::Path : Callable {
     void call(EventType, CallData*) override {
         const auto receipt = request->receipt();
         if (receipt.ready_ns != timing.finish_ns || receipt.start_ns < receipt.ready_ns ||
-            receipt.finish_ns < receipt.start_ns) {
+            receipt.release_ns < receipt.start_ns || receipt.finish_ns < receipt.release_ns) {
             throw std::logic_error("noncontiguous physical path service timing");
         }
         if (hop == 1) timing.first_start_ns = receipt.start_ns;
@@ -99,9 +100,11 @@ PhysicalRouteTransport::PhysicalRouteTransport(const std::string& path, const st
         "transport_projection_digest", "service_binding_digest", "service_activation_id",
         "rank_count", "routes", "routes_digest"});
     const auto& service = services.transport_configuration();
+    const auto* profile = service.policy == TransportLatencyPolicy::Propagation
+        ? kPropagationProfile : kProfile;
     const auto digest = Wire::name(body["routes_digest"]);
     body.erase("routes_digest");
-    if (body["schema_version"] != "physical-message-routes-v1" || body["timing_profile"] != kProfile ||
+    if (body["schema_version"] != "physical-message-routes-v1" || body["timing_profile"] != profile ||
         body["physical_network_sha256"] != service.physical_network_sha256 ||
         body["transport_projection_digest"] != service.projection_digest ||
         body["service_binding_digest"] != services.identity().binding_digest ||
@@ -110,7 +113,7 @@ PhysicalRouteTransport::PhysicalRouteTransport(const std::string& path, const st
         throw std::invalid_argument("physical route identity/profile mismatch");
     }
     routes_ = read_routes(body, service, systems.size());
-    summary_ = {{"schema_version", "physical-route-summary-v1"}, {"timing_profile", kProfile},
+    summary_ = {{"schema_version", "physical-route-summary-v1"}, {"timing_profile", profile},
         {"uncalibrated", true}, {"physical_network_sha256", service.physical_network_sha256},
         {"routes_digest", digest}, {"submitted_messages", 0u}, {"completed_messages", 0u},
         {"completed_payload_bytes", 0u}, {"resources", Json::object()}};
@@ -206,6 +209,10 @@ void PhysicalRouteTransport::record(const TransportReceipt& receipt) {
     add(row, "completed_payload_bytes", receipt.payload_bytes);
     add(row, "queue_wait_ns", receipt.start_ns - receipt.ready_ns);
     add(row, "service_ns", receipt.finish_ns - receipt.start_ns);
+    if (services_.transport_configuration().policy == TransportLatencyPolicy::Propagation) {
+        add(row, "busy_ns", receipt.release_ns - receipt.start_ns);
+        add(row, "propagation_ns", receipt.finish_ns - receipt.release_ns);
+    }
     row["first_ready_ns"] = std::min(row.value("first_ready_ns", UINT64_MAX), receipt.ready_ns);
     row["last_finish_ns"] = std::max(row.value("last_finish_ns", uint64_t{0}), receipt.finish_ns);
 }

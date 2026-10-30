@@ -120,7 +120,7 @@ if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
             ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
-        foreach(path_case paths delayed invalid observer-failure completion-failure)
+        foreach(path_case paths delayed invalid observer-failure completion-failure propagation propagation-pending propagation-failure)
             add_test(NAME AstraSim_PhysicalRoutePath_${path_case}
                 COMMAND AstraSim_PhysicalRoutePath_Test
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json ${path_case})

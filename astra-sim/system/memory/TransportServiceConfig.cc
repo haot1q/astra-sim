@@ -57,14 +57,17 @@ TransportServiceConfig load_transport_service_config(
     Wire::fields(body, {"schema_version", "physical_network_sha256", "service_binding_digest",
         "service_activation_id", "policy", "rounding_mode", "rank_count", "resources", "links",
         "projection_digest"});
+    const bool propagation = body["policy"] == "fifo_service_then_propagate_v1";
     if (body["schema_version"] != "transport-service-v1" ||
-        body["policy"] != "fifo_serialized_latency_v1" || body["rounding_mode"] != "ceil_ns_v1" ||
+        (!propagation && body["policy"] != "fifo_serialized_latency_v1") ||
+        body["rounding_mode"] != "ceil_ns_v1" ||
         body["service_binding_digest"] != physical.identity.binding_digest ||
         body["service_activation_id"] != physical.identity.activation_id ||
         Wire::uint32(body["rank_count"]) != physical.ranks.size()) {
         throw std::invalid_argument("transport identity, policy or rank coverage mismatch");
     }
     TransportServiceConfig result;
+    result.policy = propagation ? TransportLatencyPolicy::Propagation : TransportLatencyPolicy::Serialized;
     result.physical_network_sha256 = Wire::name(body["physical_network_sha256"]);
     const auto& sha = result.physical_network_sha256;
     if (sha.size() != 64 || !std::all_of(sha.begin(), sha.end(), [](char ch) {
