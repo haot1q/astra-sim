@@ -98,6 +98,19 @@ endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     if(BUILD_TESTING)
+        add_executable(AstraSim_PhysicalRoutePath_Test tests/PhysicalRoutePathTest.cc
+            congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+        target_link_libraries(AstraSim_PhysicalRoutePath_Test PRIVATE
+            AstraSim Analytical_Congestion_Unaware)
+        target_include_directories(AstraSim_PhysicalRoutePath_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
+        foreach(path_case paths delayed invalid observer-failure completion-failure)
+            add_test(NAME AstraSim_PhysicalRoutePath_${path_case}
+                COMMAND AstraSim_PhysicalRoutePath_Test
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json ${path_case})
+        endforeach()
         add_executable(AstraSim_PdPathEvent_Test tests/PdPathEventTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
         target_link_libraries(AstraSim_PdPathEvent_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
