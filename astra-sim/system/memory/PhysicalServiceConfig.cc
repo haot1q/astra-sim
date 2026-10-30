@@ -194,22 +194,47 @@ BindingRows parse_bindings(const Json& raw, const Ranks& ranks,
 }
 
 void validate_wiring(const BindingRows& bindings, const Rows& resources,
-                     const Contracts& contracts) {
+                     const Contracts& contracts, const MemoryTierConfigSet& memory) {
     std::map<std::string, std::set<std::string>> endpoints;
+    std::map<std::string, std::map<uint32_t, std::set<ServiceEndpoint>>> logical_peers;
+    std::set<std::set<ServiceEndpoint>> pairs;
+    if (memory.native_payload.contains("home_domain_topology")) {
+        for (const auto& domain : memory.native_payload["home_domain_topology"]["domains"]) {
+            pairs.insert({memory_endpoint(domain.at("hot")), memory_endpoint(domain.at("cold"))});
+        }
+    }
     for (const auto& [key, row] : bindings.rows) {
         const auto& [rank, kind, logical, device] = key;
         auto& required = endpoints[row["physical_resource_ref"]];
         for (const auto& [peer_kind, peer_name, peer_device] :
              contracts.at({kind, logical, device}).peers) {
+            if (kind == "ucie") {
+                logical_peers[row["physical_resource_ref"]][rank].insert(
+                    {peer_kind, peer_name, peer_device});
+            }
             required.insert(bindings.rows.at({rank, peer_kind, peer_name, peer_device})
                                 ["physical_resource_ref"].get<std::string>());
         }
     }
     for (const auto& [ref, resource] : resources) {
         const auto declared = resource["memory_endpoints"].get<std::set<std::string>>();
-        if (declared != endpoints.at(ref) ||
-            (resource["kind"] == "ucie" && declared.size() != 1)) {
+        if (declared != endpoints.at(ref)) {
             throw std::invalid_argument("physical memory endpoint wiring mismatch: " + ref);
+        }
+        if (resource["kind"] == "ucie" && declared.size() != 1) {
+            if (declared.size() != 2) {
+                throw std::invalid_argument("shared UCIe requires one complete Home pair");
+            }
+            for (const auto& [rank, peers] : logical_peers.at(ref)) {
+                std::set<std::string> mapped;
+                for (const auto& [kind, logical, device] : peers) {
+                    mapped.insert(bindings.rows.at({rank, kind, logical, device})
+                                      ["physical_resource_ref"].get<std::string>());
+                }
+                if (!pairs.count(peers) || mapped != declared) {
+                    throw std::invalid_argument("shared UCIe requires one complete Home pair");
+                }
+            }
         }
         for (const auto& peer : declared) {
             if (resources.at(peer)["kind"] != "memory") {
@@ -253,7 +278,7 @@ PhysicalServiceConfig load_physical_service_config(
     const auto resources = parse_resources(body["resources"]);
     const auto contracts = service_contracts(memory);
     auto bindings = parse_bindings(body["bindings"], rank_rows, resources, contracts);
-    validate_wiring(bindings, resources, contracts);
+    validate_wiring(bindings, resources, contracts, memory);
     body["ranks"] = values(rank_rows);
     body["resources"] = values(resources);
     body["bindings"] = values(bindings.rows);
