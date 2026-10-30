@@ -33,6 +33,10 @@ void CmdLineParser::define_options() noexcept {
         cxxopts::value<std::string>()->default_value(""))(
         "physical-message-routes", "Explicit physical message route projection",
         cxxopts::value<std::string>()->default_value(""))(
+        "physical-memory-routes", "Explicit additional UCIe fabric paths",
+        cxxopts::value<std::string>()->default_value(""))(
+        "memory-transport-summary", "Fresh memory transport aggregate output",
+        cxxopts::value<std::string>()->default_value(""))(
         "physical-route-summary", "Fresh aggregate physical route evidence output",
         cxxopts::value<std::string>()->default_value(""))(
         "network-configuration", "Network configuration file",

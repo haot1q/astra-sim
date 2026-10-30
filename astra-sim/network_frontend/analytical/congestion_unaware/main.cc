@@ -19,6 +19,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/PdLocalPreparationExecutor.hh"
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -31,6 +32,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--memory-transport-capability") {
+        std::cout << "append_distinct_ucie_fabric_v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--physical-route-capability") {
         std::cout << "message_store_forward_v1" << std::endl;
         return 0;
@@ -103,6 +108,12 @@ int main(int argc, char* argv[]) {
     const auto route_path = cmd_line_parser.get<std::string>("physical-message-routes");
     const auto transport_path = cmd_line_parser.get<std::string>("transport-service-bindings");
     const auto route_summary = cmd_line_parser.get<std::string>("physical-route-summary");
+    const auto memory_routes = cmd_line_parser.get<std::string>("physical-memory-routes");
+    const auto memory_summary = cmd_line_parser.get<std::string>("memory-transport-summary");
+    if (memory_routes.empty() != memory_summary.empty() || (!memory_routes.empty() && route_path.empty()) ||
+        (!memory_summary.empty() && std::filesystem::exists(memory_summary))) {
+        throw std::invalid_argument("memory transport requires physical routes and fresh summary");
+    }
     if (route_path.empty() != transport_path.empty() || route_path.empty() != route_summary.empty() ||
         (!route_path.empty() && (!cmd_line_parser.get<std::string>("pd-path-service-bindings").empty() ||
           workload_configuration.rfind("template-", 0) == 0))) {
@@ -110,7 +121,7 @@ int main(int argc, char* argv[]) {
     }
     PhysicalServiceFactory services(memory_config,
         cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count,
-        cmd_line_parser.get<std::string>("pd-path-service-bindings"), transport_path);
+        cmd_line_parser.get<std::string>("pd-path-service-bindings"), transport_path, memory_routes);
 
     auto systems = std::vector<Sys*>();
 
@@ -139,6 +150,7 @@ int main(int argc, char* argv[]) {
         physical_routes = std::make_unique<PhysicalRouteTransport>(route_path, route_summary,
             services, systems, event_queue);
         for (auto& network : network_apis) network->set_physical_transport(physical_routes.get());
+        services.attach_transport_path_api(*physical_routes);
     }
     PdKvTransferExecutor pd_kv_executor(systems, &services, pd_network_projection(network_parser));
     PdLocalPreparationExecutor preparation_executor(systems, &services, &memory_config);
@@ -197,6 +209,7 @@ int main(int argc, char* argv[]) {
       }
     }
 
+    try {
     // Initiate simulation
     for (int i = 0; i < npus_count; i++) {
         systems[i]->workload->emit_rank_completions = rank_notifications;
@@ -291,8 +304,8 @@ int main(int argc, char* argv[]) {
       std::fill(pass_gen.begin(), pass_gen.end(), -1);
     };
 
-    const auto all_systems_drained = [&systems, &pd_kv_executor, &preparation_executor, &physical_routes]() {
-      return (!physical_routes || physical_routes->drained()) &&
+    const auto all_systems_drained = [&systems, &pd_kv_executor, &preparation_executor, &physical_routes, &services]() {
+      return services.memory_transport_drained() && (!physical_routes || physical_routes->drained()) &&
           pd_kv_executor.drained() && preparation_executor.drained() && std::all_of(
           systems.begin(), systems.end(), [](const Sys* system) {
             return system->workload->is_finished &&
@@ -547,6 +560,10 @@ int main(int argc, char* argv[]) {
       }
     }
 
+    } catch (...) {
+        services.write_memory_transport_summary(memory_summary, true);
+        throw;
+    }
     // check non exited system
     emit_memory_protocol_line("Checking Non-Exited Systems ...");
     bool done = true;
@@ -565,6 +582,7 @@ int main(int argc, char* argv[]) {
         physical_routes->rethrow_failure();
         physical_routes->write_summary();
     }
+    services.write_memory_transport_summary(memory_summary, false);
     AstraSim::LoggerFactory::shutdown();
     if (done){
       cout << "---------------------------" << endl;

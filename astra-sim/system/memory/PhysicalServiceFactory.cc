@@ -6,6 +6,8 @@ LICENSE file in the root directory of this source tree.
 #include "PhysicalServiceFactory.hh"
 
 #include <cstdio>
+#include <algorithm>
+#include <fstream>
 #include <stdexcept>
 #include <utility>
 
@@ -15,12 +17,15 @@ namespace AstraSim {
 
 PhysicalServiceFactory::PhysicalServiceFactory(
     const MemoryTierConfigSet& memory, const std::string& binding_path, uint32_t rank_count,
-    const std::string& pd_path_binding_path, const std::string& transport_path)
+    const std::string& pd_path_binding_path, const std::string& transport_path,
+    const std::string& memory_transport_path)
     : native_(memory.native) {
     if (native_) {
         config_ = load_physical_service_config(binding_path, memory, rank_count);
         pd_config_ = load_pd_path_service_config(pd_path_binding_path, config_);
         transport_config_ = load_transport_service_config(transport_path, config_);
+        memory_transport_config_ = load_memory_transport_config(memory_transport_path,
+            config_, transport_config_, memory.manifest_digest);
         for (const auto& [ref, backend] : config_.backends) {
             physical_.emplace(ref, own(backend, true));
         }
@@ -35,7 +40,7 @@ PhysicalServiceFactory::PhysicalServiceFactory(
                 {"bandwidth-resource", bandwidth_resource_config_to_json(resource.bandwidth)}}, true));
         }
     } else {
-        if (!binding_path.empty() || !pd_path_binding_path.empty() || !transport_path.empty()) {
+        if (!binding_path.empty() || !pd_path_binding_path.empty() || !transport_path.empty() || !memory_transport_path.empty()) {
             throw std::invalid_argument("legacy memory cannot use physical service bindings");
         }
         legacy_backends(memory);
@@ -99,8 +104,14 @@ RankServiceBindings PhysicalServiceFactory::rank_bindings(
     }
     std::vector<UcieLinkBinding> links;
     for (const auto& link : memory.ucie_links) {
+        auto* api = route(rank, "ucie", link.id, link.stack_count);
+        if (std::any_of(memory_transport_config_.operations.begin(), memory_transport_config_.operations.end(),
+                [&](const auto& item) { return std::get<0>(item.first) == rank && std::get<1>(item.first) == link.id; })) {
+            memory_transports_.push_back(std::make_unique<MemoryTransportAdapter>(rank, link.id, *api, memory_transport_config_));
+            api = memory_transports_.back().get();
+        }
         links.push_back({link.id, link.stack_count, link.header_bytes, link.latency_ns,
-            route(rank, "ucie", link.id, link.stack_count)});
+            api});
     }
     result.ucie = UcieLinkRegistry(std::move(links));
     if (memory.has_movement_paths) {
@@ -151,9 +162,32 @@ TransportServiceAdapter& PhysicalServiceFactory::transport(
 }
 
 void PhysicalServiceFactory::rethrow_failure() const {
+    for (const auto& adapter : memory_transports_) adapter->rethrow_failure();
     for (const auto& [key, transport] : transports_) transport->rethrow_failure();
     for (const auto& adapter : adapters_) adapter->rethrow_failure();
     for (const auto& memory : memories_) memory->rethrow_failure();
+}
+
+void PhysicalServiceFactory::attach_transport_path_api(TransportPathAPI& path) {
+    for (const auto& adapter : memory_transports_) adapter->attach(path);
+}
+
+bool PhysicalServiceFactory::memory_transport_drained() const {
+    return std::all_of(memory_transports_.begin(), memory_transports_.end(),
+                       [](const auto& adapter) { return adapter->drained(); });
+}
+
+void PhysicalServiceFactory::write_memory_transport_summary(const std::string& path, bool failed) const {
+    if (path.empty()) return;
+    nlohmann::json summary{{"schema_version", "physical-memory-transport-summary-v1"},
+        {"operation_projection_digest", memory_transport_config_.digest},
+        {"status", failed ? "failed" : memory_transport_drained() ? "completed" : "incomplete"},
+        {"bindings", nlohmann::json::array()}};
+    for (const auto& adapter : memory_transports_) summary["bindings"].push_back(adapter->summary());
+    std::ofstream stream(path);
+    stream << summary.dump(2) << '\n';
+    stream.close();
+    if (!stream) throw std::runtime_error("cannot save memory transport summary");
 }
 
 }  // namespace AstraSim
