@@ -12,6 +12,7 @@ LICENSE file in the root directory of this source tree.
 #include <memory_backend/analytical/AnalyticalMemory.hh>
 #include "astra-sim/system/MemoryTierConfig.hh"
 #include "astra-sim/system/memory/PhysicalServiceFactory.hh"
+#include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include "astra-sim/system/memory/UcieLinkRegistry.hh"
 #include "astra-sim/system/memory/MovementPathRegistry.hh"
 #include "astra-sim/system/PdKvTransferExecutor.hh"
@@ -38,6 +39,10 @@ int main(int argc, char* argv[]) {
     }
     if (argc == 2 && std::string(argv[1]) == "--physical-route-capability") {
         std::cout << "message_store_forward_v1" << std::endl;
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--physical-route-pipeline-capability") {
+        std::cout << "message_block_pipeline_v1" << std::endl;
         return 0;
     }
     if (argc == 2 && std::string(argv[1]) == "--physical-route-propagation-capability") {
@@ -122,6 +127,10 @@ int main(int argc, char* argv[]) {
         (!route_path.empty() && (!cmd_line_parser.get<std::string>("pd-path-service-bindings").empty() ||
           workload_configuration.rfind("template-", 0) == 0))) {
         throw std::invalid_argument("physical route flags require one Reference mode without P/D paths");
+    }
+    if (!memory_routes.empty() && ServiceBindingJson::read(route_path).value("timing_profile", "") ==
+            "message_block_pipeline_v1") {
+        throw std::invalid_argument("block pipeline does not support physical_memory_transport");
     }
     PhysicalServiceFactory services(memory_config,
         cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count,
@@ -565,6 +574,7 @@ int main(int argc, char* argv[]) {
     }
 
     } catch (...) {
+        if (physical_routes) physical_routes->abort(std::current_exception());
         services.write_memory_transport_summary(memory_summary, true);
         throw;
     }

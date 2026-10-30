@@ -7,6 +7,7 @@ This source code is licensed under the MIT license found in the root LICENSE.
 #include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,10 +32,18 @@ class PhysicalRouteTransport : public AstraSim::TransportPathAPI {
     bool drained() const override;
     void rethrow_failure() override;
     void write_summary();
+    void abort(std::exception_ptr failure);
     void validate_path(uint32_t rank, uint64_t bytes, const std::vector<std::string>& links) const override;
 
   private:
     struct Path;
+    struct PipelineLimits {
+        uint64_t block_bytes, message_blocks, message_hops, inflight_blocks, inflight_hops;
+    };
+    void check_budget(uint64_t blocks, uint64_t hops) const;
+    uint64_t block_count(uint64_t bytes, size_t hops) const;
+    void publish(std::vector<std::unique_ptr<Path>> paths);
+    void submit_blocks(Key key, void (*arrival)(void*));
     void advance(Path& path);
     void record(const AstraSim::TransportReceipt& receipt);
     static void continue_path(void* data);
@@ -49,5 +58,7 @@ class PhysicalRouteTransport : public AstraSim::TransportPathAPI {
     uint64_t next_id_ = 0;
     uint64_t pending_messages_ = 0;
     bool summary_written_ = false;
+    std::optional<PipelineLimits> pipeline_;
+    uint64_t reserved_hops_ = 0;
 };
 }  // namespace AstraSimAnalytical
