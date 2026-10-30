@@ -40,6 +40,10 @@ int main(int argc, char* argv[]) {
         std::cout << "message_store_forward_v1" << std::endl;
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--physical-route-propagation-capability") {
+        std::cout << "message_store_forward_propagation_v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--dependency-delay-capability") {
         std::cout << "dependency-delay-v1" << std::endl;
         return 0;

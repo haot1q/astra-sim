@@ -146,6 +146,8 @@ struct RequestPattern {
     bool transport = false;
     uint64_t second_ready = 0;
     unsigned requests = 2;
+    uint64_t propagation_ns = 0, probe_ns = 0;
+    bool duplicate = false, early_callback = false;
 };
 
 struct TransportRun {
@@ -178,11 +180,15 @@ struct TransportRun {
         const auto first = requests[0]->receipt();
         require(first.finish_ns == pattern.first_finish && first.ready_ns == 0 && first.start_ns == 0,
                 "first transport duration changed");
+        require(first.release_ns == first.finish_ns - pattern.propagation_ns,
+                "transport release includes propagation");
         if (pattern.requests == 2) {
             const auto second = requests[1]->receipt();
             require(second.finish_ns == second_finish && second.ready_ns == pattern.second_ready &&
                     second.start_ns == second_finish - pattern.first_finish,
                     "transport shared queue or actual ready time mismatch");
+            require(second.release_ns == second.finish_ns - pattern.propagation_ns,
+                    "second transport release includes propagation");
         }
     }
 
@@ -258,6 +264,24 @@ void run_events(Json document, const char* name, uint64_t second_finish,
             {rank == 1 && pattern.second_bytes != 0 ? pattern.second_bytes : pattern.bytes,
              rank == 0 ? MemoryOperation::Read : pattern.second}, &requests[rank]);
     }
+    auto probe = [&] {
+        require(transport.completion.calls == 0 && transport.requests[1]->memory_start_ns == 4,
+                "propagation blocked the original resource or completed early");
+        for (const auto& request : transport.requests) {
+            bool rejected = false;
+            try { request->receipt(); } catch (const std::logic_error&) { rejected = true; }
+            require(rejected, "in-flight propagation exposed a receipt");
+        }
+        if (pattern.early_callback) {
+            bool rejected = false;
+            try { transport.requests[0]->call(EventType::General, transport.requests[0].get()); }
+            catch (const std::logic_error&) { rejected = true; }
+            require(rejected, "early transport callback accepted");
+        }
+    };
+    if (pattern.probe_ns) events->schedule_event(pattern.probe_ns, [](void* data) {
+        (*static_cast<decltype(probe)*>(data))();
+    }, &probe);
     for (unsigned steps = 0; !events->finished(); ++steps) {
         require(steps < 100, "physical memory callbacks did not drain");
         events->proceed();
@@ -268,6 +292,14 @@ void run_events(Json document, const char* name, uint64_t second_finish,
     }
     if (pattern.transport) {
         transport.check(pattern, second_finish);
+        if (pattern.duplicate) {
+            bool rejected = false;
+            try { transport.requests.back()->call(EventType::General, transport.requests.back().get()); }
+            catch (const std::logic_error&) { rejected = true; }
+            require(rejected && transport.completion.calls == pattern.requests,
+                    "duplicate transport arrival was accepted");
+            transport.check_failed_last();
+        }
         LoggerFactory::get_logger("physical-service-test")->info("PASS {}", name);
         return;
     }
@@ -351,7 +383,7 @@ void logical_alias(Json input) {
 }
 
 Json transport_document(Json input, bool independent = false, uint64_t rate = 1'000'000'000ULL,
-                        uint64_t latency = 5) {
+                        uint64_t latency = 5, bool propagation = false) {
     seal(input);
     Json resources = {{{"id", "shared"}, {"bandwidth_bytes_per_second", rate}, {"latency_ns", latency}}};
     if (independent) resources.push_back({{"id", "other"}, {"bandwidth_bytes_per_second", rate},
@@ -360,7 +392,8 @@ Json transport_document(Json input, bool independent = false, uint64_t rate = 1'
         {"physical_network_sha256", std::string(64, 'a')},
         {"service_binding_digest", input["binding"]["binding_digest"]},
         {"service_activation_id", input["binding"]["activation_id"]},
-        {"policy", "fifo_serialized_latency_v1"}, {"rounding_mode", "ceil_ns_v1"},
+        {"policy", propagation ? "fifo_service_then_propagate_v1" : "fifo_serialized_latency_v1"},
+        {"rounding_mode", "ceil_ns_v1"},
         {"rank_count", 2u}, {"resources", resources}, {"links", {
             {{"id", "out"}, {"source", "a"}, {"target", "b"}, {"resource", "shared"}},
             {{"id", "back"}, {"source", "b"}, {"target", "a"},
@@ -394,6 +427,48 @@ void transport_events(const Json& golden) {
     try { run_events(transport_document(golden), "transport-queued-overflow", 0, pattern); }
     catch (const std::overflow_error&) { rejected = true; }
     require(rejected, "queued transport overflow was swallowed");
+}
+
+void propagation_events(const Json& golden) {
+    RequestPattern pattern;
+    pattern.transport = true;
+    pattern.bytes = 64;
+    pattern.first_finish = 69;
+    pattern.propagation_ns = 5;
+    auto wire = transport_document(golden, false, 1'000'000'000ULL, 5, true);
+    run_events(wire, "propagation-reverse-shared", 133, pattern);
+    run_events(transport_document(golden, true, 1'000'000'000ULL, 5, true),
+               "propagation-independent", 69, pattern);
+    pattern.second_ready = 100;
+    run_events(wire, "propagation-delayed-ready", 169, pattern);
+    pattern.second_ready = 0;
+    // Trigger at a small service tick; Sys's double time bridge cannot deliver near-UINT64 ticks exactly.
+    pattern.bytes = 4096;
+    pattern.second_bytes = 8192;
+    bool rejected = false;
+    try { run_events(transport_document(golden, false, 1'000'000'000ULL, UINT64_MAX - 8192, true),
+                     "propagation-queued-arrival-overflow", 0, pattern); }
+    catch (const std::overflow_error&) { rejected = true; }
+    require(rejected, "queued arrival overflow was swallowed");
+    pattern.second_bytes = 0;
+    pattern.bytes = 1;
+    pattern.first_finish = 1;
+    pattern.propagation_ns = 0;
+    run_events(transport_document(golden, false, 3'000'000'000ULL, 0, true),
+               "propagation-zero-latency-ceil", 2, pattern);
+    pattern.bytes = 4;
+    pattern.first_finish = 104;
+    pattern.propagation_ns = 100;
+    pattern.probe_ns = 5;
+    pattern.duplicate = true;
+    wire = transport_document(golden, false, 1'000'000'000ULL, 100, true);
+    run_events(wire, "propagation-pending-and-duplicate", 108, pattern);
+    pattern.duplicate = false;
+    pattern.early_callback = true;
+    rejected = false;
+    try { run_events(wire, "propagation-early-arrival", 0, pattern); }
+    catch (const std::logic_error&) { rejected = true; }
+    require(rejected, "early arrival was accepted");
 }
 
 template <class Function>
@@ -527,6 +602,7 @@ int main(int argc, char** argv) {
         nonzero_logical_device(golden);
         logical_alias(golden);
         transport_events(golden);
+        propagation_events(golden);
         transport_contracts(golden);
     } catch (const std::exception& error) {
         std::cerr << "physical service event test failed: " << error.what() << std::endl;
