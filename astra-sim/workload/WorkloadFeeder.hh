@@ -6,6 +6,7 @@ LICENSE file in the root directory of this source tree.
 #ifndef __WORKLOAD_FEEDER_HH__
 #define __WORKLOAD_FEEDER_HH__
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -64,6 +65,7 @@ class ChakraEtWorkloadFeeder final : public WorkloadFeeder {
   public:
     explicit ChakraEtWorkloadFeeder(const std::string& filename);
 
+    std::size_t readyNodeCount() const { return feeder_.readyNodeCount(); }
     bool hasNodesToIssue() override;
     std::shared_ptr<Chakra::ETFeederNode> getNextIssuableNode() override;
     void pushBackIssuableNode(uint64_t node_id) override;

@@ -103,6 +103,7 @@ class Workload : public Callable {
     void report_template_metrics() const;
     void record_parent_completion(
         const std::shared_ptr<Chakra::ETFeederNode>& node);
+    void remove_completed_node(uint64_t node_id);
     void reset_iteration_tracking();
     std::unordered_map<uint64_t, uint64_t> latest_parent_completion_ns_;
     std::unordered_map<uint64_t, std::shared_ptr<Chakra::ETFeederNode>> pending_memory_waits_;
