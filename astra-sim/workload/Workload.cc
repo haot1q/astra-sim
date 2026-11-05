@@ -830,6 +830,19 @@ void Workload::skip_invalid(shared_ptr<Chakra::ETFeederNode> node) {
     et_feeder->removeNode(node->id());
 }
 
+void Workload::remove_completed_node(uint64_t node_id) {
+    auto* chakra_feeder = dynamic_cast<ChakraEtWorkloadFeeder*>(et_feeder);
+    const auto ready_before =
+        chakra_feeder == nullptr ? 0 : chakra_feeder->readyNodeCount();
+    et_feeder->removeNode(node_id);
+    // Removal only adds ready work through refill. Do not rescan old blocked work.
+    if ((chakra_feeder != nullptr &&
+         chakra_feeder->readyNodeCount() > ready_before) ||
+        dynamic_cast<IndexedTemplateProgramFeeder*>(et_feeder) != nullptr) {
+        issue_dep_free_nodes();
+    }
+}
+
 void Workload::call(EventType event, CallData* data) {
     if (is_finished) {
         return;
@@ -860,10 +873,7 @@ void Workload::call(EventType event, CallData* data) {
         // more statistics in the workload layer
         delete collective_comm_wrapper_map[int_data->data];
         collective_comm_wrapper_map.erase(int_data->data);
-        et_feeder->removeNode(node_id);
-        if (dynamic_cast<IndexedTemplateProgramFeeder*>(et_feeder) != nullptr) {
-            issue_dep_free_nodes();
-        }
+        remove_completed_node(node_id);
 
     } else {
         if (data == nullptr) {
@@ -895,10 +905,7 @@ void Workload::call(EventType event, CallData* data) {
 
             issue_dep_free_nodes();
 
-            et_feeder->removeNode(wlhd->node_id);
-            if (dynamic_cast<IndexedTemplateProgramFeeder*>(et_feeder) != nullptr) {
-                issue_dep_free_nodes();
-            }
+            remove_completed_node(wlhd->node_id);
             delete wlhd;
         }
     }
