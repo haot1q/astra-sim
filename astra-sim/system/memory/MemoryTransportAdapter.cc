@@ -23,8 +23,8 @@ struct MemoryTransportAdapter::Context {
 };
 
 MemoryTransportAdapter::MemoryTransportAdapter(uint32_t rank, std::string link,
-    AstraMemoryAPI& original, const MemoryTransportConfig& config)
-    : rank_(rank), link_(std::move(link)), original_(original), config_(config) {}
+    AstraMemoryAPI& original, const MemoryTransportConfig& config, bool* failure_seen)
+    : rank_(rank), link_(std::move(link)), original_(original), config_(config), failure_seen_(failure_seen) {}
 
 void MemoryTransportAdapter::attach(TransportPathAPI& path) {
     if (path_ && path_ != &path) throw std::logic_error("memory transport path already attached");
@@ -71,6 +71,7 @@ void MemoryTransportAdapter::issue(const MemoryRequest& request, WorkloadLayerHa
             pending_.erase(found);
         }
         failure_ = std::current_exception();
+        if (failure_seen_) *failure_seen_ = true;
         throw;
     }
 }
@@ -82,7 +83,11 @@ void MemoryTransportAdapter::fabric(const std::shared_ptr<Context>& context) {
                 context->fabric_time = timing;
                 if (context->operation.before) original_.issue(context->request, context->handler);
                 else finish(context);
-            } catch (...) { failure_ = std::current_exception(); throw; }
+            } catch (...) {
+                failure_ = std::current_exception();
+                if (failure_seen_) *failure_seen_ = true;
+                throw;
+            }
         }, [this, context](const TransportReceipt& receipt) {
             auto& row = counters_[context->counter_key]["resources"][receipt.resource_id];
             if (row.is_null()) row = nlohmann::json::object();
@@ -102,7 +107,11 @@ void MemoryTransportAdapter::call(EventType type, CallData* data) {
                               handler->memory_finish_ns, wait, service};
         if (context->operation.before) finish(context);
         else fabric(context);
-    } catch (...) { failure_ = std::current_exception(); throw; }
+    } catch (...) {
+        failure_ = std::current_exception();
+        if (failure_seen_) *failure_seen_ = true;
+        throw;
+    }
 }
 
 void MemoryTransportAdapter::finish(const std::shared_ptr<Context>& context) {

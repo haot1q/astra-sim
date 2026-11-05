@@ -48,7 +48,8 @@ class TransportRequest : public WorkloadLayerHandlerData, public Callable {
 class TransportServiceAdapter {
   public:
     TransportServiceAdapter(uint32_t rank, TransportLink link, TransportResource resource,
-                            PhysicalServiceAdapter& adapter, TransportLatencyPolicy policy);
+                            PhysicalServiceAdapter& adapter, TransportLatencyPolicy policy,
+                            bool* failure_seen = nullptr);
     void set_sys(Sys* sys);
     void issue(TransportRequest& request);
     void rethrow_failure() const;
@@ -63,6 +64,7 @@ class TransportServiceAdapter {
     Sys* sys_ = nullptr;  // Original event owner; no private clock or queue.
     PhysicalServiceAdapter& adapter_;
     std::exception_ptr failure_;
+    bool* failure_seen_;  // Optional single-thread owner flag; must outlive this adapter.
 };
 }  // namespace AstraSim
 #endif

@@ -26,6 +26,8 @@ LICENSE file in the root directory of this source tree.
 #include <astra-network-analytical/congestion_unaware/Helper.h>
 #include "protoio.hh"
 
+void run_physical_service_failure_tests(const nlohmann::json& golden);
+
 namespace {
 using namespace AstraSim;
 using Json = nlohmann::json;
@@ -299,6 +301,14 @@ void run_events(Json document, const char* name, uint64_t second_finish,
             require(rejected && transport.completion.calls == pattern.requests,
                     "duplicate transport arrival was accepted");
             transport.check_failed_last();
+            for (unsigned check = 0; check < 2; ++check) {
+                rejected = false;
+                try { services.rethrow_failure(); }
+                catch (const std::logic_error& error) {
+                    rejected = std::string(error.what()) == "invalid transport completion context";
+                }
+                require(rejected, "duplicate transport failure was not retained by factory");
+            }
         }
         LoggerFactory::get_logger("physical-service-test")->info("PASS {}", name);
         return;
@@ -604,6 +614,7 @@ int main(int argc, char** argv) {
         transport_events(golden);
         propagation_events(golden);
         transport_contracts(golden);
+        run_physical_service_failure_tests(golden);
     } catch (const std::exception& error) {
         std::cerr << "physical service event test failed: " << error.what() << std::endl;
         return 1;

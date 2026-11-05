@@ -159,6 +159,7 @@ if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/physical-service-golden.json ordinary_late)
         add_executable(AstraSim_PhysicalServiceEvent_Test
             tests/PhysicalServiceEventTest.cc
+            tests/PhysicalServiceFailureTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
         target_link_libraries(AstraSim_PhysicalServiceEvent_Test PRIVATE
             AstraSim Analytical_Congestion_Unaware)
