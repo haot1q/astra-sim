@@ -17,7 +17,8 @@ namespace AstraSim {
 class PhysicalServiceAdapter : public AstraMemoryAPI {
   public:
     PhysicalServiceAdapter(uint32_t rank, std::vector<AstraMemoryAPI*> devices,
-                           MemoryTimeRounding rounding = MemoryTimeRounding::Floor);
+                           MemoryTimeRounding rounding = MemoryTimeRounding::Floor,
+                           bool* failure_seen = nullptr);
     void set_sys(int id, Sys* sys) override;
     void issue(const MemoryRequest& request, WorkloadLayerHandlerData* handler) override;
     MemoryLocationType get_memory_location_type() const override;
@@ -29,6 +30,7 @@ class PhysicalServiceAdapter : public AstraMemoryAPI {
     std::vector<AstraMemoryAPI*> devices_;
     Sys* sys_ = nullptr;
     std::exception_ptr failure_;
+    bool* failure_seen_;  // Optional single-thread owner flag; must outlive this adapter.
 };
 
 }  // namespace AstraSim

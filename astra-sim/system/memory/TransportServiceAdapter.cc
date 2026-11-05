@@ -52,6 +52,7 @@ void TransportRequest::call(EventType type, CallData* data) {
         completed_ = false;
         phase_ = Phase::Failed;
         service_->failure_ = std::current_exception();
+        if (service_->failure_seen_) *service_->failure_seen_ = true;
         throw;
     }
 }
@@ -64,9 +65,9 @@ TransportReceipt TransportRequest::receipt() const {
 
 TransportServiceAdapter::TransportServiceAdapter(
     uint32_t rank, TransportLink link, TransportResource resource, PhysicalServiceAdapter& adapter,
-    TransportLatencyPolicy policy)
+    TransportLatencyPolicy policy, bool* failure_seen)
     : rank_(rank), link_(std::move(link)), service_time_(resource.bandwidth),
-      latency_ns_(resource.latency_ns), policy_(policy), adapter_(adapter) {}
+      latency_ns_(resource.latency_ns), policy_(policy), adapter_(adapter), failure_seen_(failure_seen) {}
 
 void TransportServiceAdapter::set_sys(Sys* sys) {
     adapter_.set_sys(rank_, sys);

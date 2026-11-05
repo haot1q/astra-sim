@@ -51,7 +51,7 @@ PhysicalServiceFactory::PhysicalServiceFactory(
     }
     for (const auto& [key, ref] : pd_config_.bindings) {
         adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(key.first,
-            std::vector<AstraMemoryAPI*>{physical_.at(ref)}, pd_config_.rounding.at(ref)));
+            std::vector<AstraMemoryAPI*>{physical_.at(ref)}, pd_config_.rounding.at(ref), &failure_seen_));
         interfaces_.emplace(key, adapters_.back().get());
     }
 }
@@ -62,7 +62,7 @@ AstraMemoryAPI* PhysicalServiceFactory::own(nlohmann::json backend, bool physica
     if (physical) backend["physical-service-mode"] = "native-single-device-v1";
     const auto path = write_temporary_memory_backend_config(backend);
     try {
-        memories_.push_back(std::make_unique<Analytical::AnalyticalMemory>(path));
+        memories_.push_back(std::make_unique<Analytical::AnalyticalMemory>(path, &failure_seen_));
     } catch (...) {
         std::remove(path.c_str());
         throw;
@@ -92,7 +92,8 @@ AstraMemoryAPI* PhysicalServiceFactory::route(
     for (uint32_t device = 0; device < devices; ++device) {
         endpoints.push_back(physical_.at(config_.bindings.at({rank, kind, ref, device})));
     }
-    adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(rank, std::move(endpoints)));
+    adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(rank, std::move(endpoints),
+        MemoryTimeRounding::Floor, &failure_seen_));
     return adapters_.back().get();
 }
 
@@ -108,7 +109,8 @@ RankServiceBindings PhysicalServiceFactory::rank_bindings(
         auto* api = route(rank, "ucie", link.id, link.stack_count);
         if (std::any_of(memory_transport_config_.operations.begin(), memory_transport_config_.operations.end(),
                 [&](const auto& item) { return std::get<0>(item.first) == rank && std::get<1>(item.first) == link.id; })) {
-            memory_transports_.push_back(std::make_unique<MemoryTransportAdapter>(rank, link.id, *api, memory_transport_config_));
+            memory_transports_.push_back(std::make_unique<MemoryTransportAdapter>(
+                rank, link.id, *api, memory_transport_config_, &failure_seen_));
             api = memory_transports_.back().get();
         }
         links.push_back({link.id, link.stack_count, link.header_bytes, link.latency_ns,
@@ -155,14 +157,17 @@ TransportServiceAdapter& PhysicalServiceFactory::transport(
     const auto key = std::make_pair(rank, link_id);
     if (!transports_.count(key)) {
         adapters_.push_back(std::make_unique<PhysicalServiceAdapter>(rank,
-            std::vector<AstraMemoryAPI*>{physical_.at(link->second.resource)}, MemoryTimeRounding::Ceil));
+            std::vector<AstraMemoryAPI*>{physical_.at(link->second.resource)},
+            MemoryTimeRounding::Ceil, &failure_seen_));
         transports_.emplace(key, std::make_unique<TransportServiceAdapter>(rank, link->second,
-            transport_config_.resources.at(link->second.resource), *adapters_.back(), transport_config_.policy));
+            transport_config_.resources.at(link->second.resource), *adapters_.back(),
+            transport_config_.policy, &failure_seen_));
     }
     return *transports_.at(key);
 }
 
 void PhysicalServiceFactory::rethrow_failure() const {
+    if (!failure_seen_) return;
     for (const auto& adapter : memory_transports_) adapter->rethrow_failure();
     for (const auto& [key, transport] : transports_) transport->rethrow_failure();
     for (const auto& adapter : adapters_) adapter->rethrow_failure();

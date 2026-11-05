@@ -16,7 +16,7 @@ namespace AstraSim {
 class MemoryTransportAdapter : public AstraMemoryAPI, public Callable {
   public:
     MemoryTransportAdapter(uint32_t rank, std::string link, AstraMemoryAPI& original,
-                           const MemoryTransportConfig& config);
+                           const MemoryTransportConfig& config, bool* failure_seen = nullptr);
     void attach(TransportPathAPI& path);
     void set_sys(int id, Sys* sys) override;
     MemoryLocationType get_memory_location_type() const override;
@@ -39,6 +39,7 @@ class MemoryTransportAdapter : public AstraMemoryAPI, public Callable {
     std::map<WorkloadLayerHandlerData*, std::shared_ptr<Context>> pending_;
     nlohmann::json counters_ = nlohmann::json::object();
     std::exception_ptr failure_;
+    bool* failure_seen_;  // Optional single-thread owner flag; must outlive this adapter.
 };
 }  // namespace AstraSim
 #endif

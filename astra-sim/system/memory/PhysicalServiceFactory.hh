@@ -57,6 +57,8 @@ class PhysicalServiceFactory {
     RankServiceBindings rank_bindings(const MemoryTierConfigSet& memory, uint32_t rank);
     void legacy_backends(const MemoryTierConfigSet& memory);
 
+    // Single event thread; sticky and declared before every notified object's owner.
+    bool failure_seen_ = false;
     PhysicalServiceConfig config_;
     PdPathServiceConfig pd_config_;
     TransportServiceConfig transport_config_;

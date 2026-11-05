@@ -18,6 +18,44 @@ using Network = AstraSimAnalyticalCongestionUnaware::CongestionUnawareNetworkApi
 
 struct Tagged : WorkloadLayerHandlerData { unsigned marker = 595; };
 
+template <class Error>
+void saved_failure(PhysicalServiceFactory& factory, const std::string& message) {
+    for (unsigned check = 0; check < 2; ++check) {
+        try { factory.rethrow_failure(); }
+        catch (const Error& error) {
+            if (error.what() != message) throw std::runtime_error("memory transport failure changed");
+            continue;
+        }
+        throw std::runtime_error("factory lost memory transport failure");
+    }
+}
+
+struct FailedConsumer : Callable {
+    unsigned calls = 0;
+    void call(EventType, CallData*) override {
+        ++calls;
+        throw std::runtime_error("deliberate memory consumer failure");
+    }
+};
+
+void failed_completion(PhysicalServiceFactory& factory,
+                       NetworkAnalytical::EventQueue& events) {
+    FailedConsumer consumer;
+    Tagged handler;
+    handler.sys_id = 0;
+    handler.completion_target = &consumer;
+    factory.at(0).ucie.at("ucie").api->issue({1, MemoryOperation::Read}, &handler);
+    for (unsigned count = 0; !events.finished(); ++count) {
+        if (count > 30) throw std::runtime_error("failed memory callbacks did not drain");
+        events.proceed();
+    }
+    if (consumer.calls != 1 || handler.completion_target != &consumer ||
+        factory.memory_transport_drained()) {
+        throw std::runtime_error("failed memory callback lost ownership or reported drainage");
+    }
+    saved_failure<std::runtime_error>(factory, "deliberate memory consumer failure");
+}
+
 struct Consumer : Callable {
     AstraMemoryAPI& link;
     Json rows = Json::array();
@@ -82,8 +120,15 @@ int main(int argc, char** argv) {
     Consumer consumer(*factory.at(0).ucie.at("ucie").api);
     if (mode == "invalid") {
         try { consumer.issue(0, 1); throw std::runtime_error("zero bytes accepted"); }
-        catch (const std::invalid_argument&) {}
+        catch (const std::invalid_argument& error) {
+            saved_failure<std::invalid_argument>(factory, error.what());
+        }
         if (!consumer.rows.empty()) throw std::runtime_error("invalid request completed");
+        factory.write_memory_transport_summary(root + "/physical/memory-summary.json", true);
+        return 0;
+    }
+    if (mode == "failure-before" || mode == "failure-after") {
+        failed_completion(factory, *events);
         factory.write_memory_transport_summary(root + "/physical/memory-summary.json", true);
         return 0;
     }
