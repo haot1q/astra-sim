@@ -152,7 +152,8 @@ Sys::Sys(int id,
          double comm_scale,
          bool rendezvous_enabled,
          UcieLinkRegistry ucie_link_registry,
-         MovementPathRegistry movement_path_registry)
+         MovementPathRegistry movement_path_registry,
+         std::shared_ptr<JointSourceContext> joint_source)
     : memory_tiers(memory_tier_bindings),
       ucie_links(std::move(ucie_link_registry)),
       movement_paths(std::move(movement_path_registry)),
@@ -167,6 +168,7 @@ Sys::Sys(int id,
     this->initialized = false;
 
     this->workload = nullptr;
+    this->joint_source_context = std::move(joint_source);
 
     this->roofline_enabled = false;
     this->peak_perf = 0;
@@ -561,6 +563,10 @@ bool Sys::initialize_sys(string name) {
         } else {
             this->replay_only = false;
         }
+    }
+
+    if (joint_source_context && replay_only) {
+        throw std::invalid_argument("joint association mode does not support replay-only execution");
     }
 
     inFile.close();

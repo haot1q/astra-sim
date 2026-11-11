@@ -31,6 +31,9 @@ file(GLOB srcs_congestion_aware
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(AstraSim_JointAccessIndex_Test tests/JointAccessIndexTest.cc)
+    target_link_libraries(AstraSim_JointAccessIndex_Test PRIVATE AstraSim)
+    add_test(NAME AstraSim_JointAccessIndex_Test COMMAND AstraSim_JointAccessIndex_Test)
     add_executable(AstraSim_ETFeederLifecycle_Test
             ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/graph_frontend/chakra/tests/feeder/lifecycle_test.cpp)
     target_link_libraries(AstraSim_ETFeederLifecycle_Test PRIVATE AstraSim)
