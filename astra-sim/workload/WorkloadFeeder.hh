@@ -41,6 +41,8 @@ class WorkloadFeeder {
     virtual bool isTemplateV3() const { return false; }
     virtual const JointNodeAccess* jointAccess(const ChakraProtoMsg::Node&,
                                               uint32_t, uint32_t) const { return nullptr; }
+    virtual std::shared_ptr<const JointNodeAccess> jointAccessLease(
+        const ChakraProtoMsg::Node&, uint32_t, uint32_t) const { return nullptr; }
 };
 
 class TemplateIdleWorkloadFeeder final : public WorkloadFeeder {
@@ -88,9 +90,11 @@ class ChakraEtWorkloadFeeder final : public WorkloadFeeder {
     std::optional<uint32_t> serviceRank() const override;
     const JointNodeAccess* jointAccess(const ChakraProtoMsg::Node& node,
                                       uint32_t rank, uint32_t iteration) const override;
+    std::shared_ptr<const JointNodeAccess> jointAccessLease(const ChakraProtoMsg::Node& node,
+        uint32_t rank, uint32_t iteration) const override;
 
   private:
-    std::unique_ptr<JointAccessIndex> joint_index_;
+    std::shared_ptr<const JointAccessIndex> joint_index_;
     Chakra::ETFeeder feeder_;
 };
 

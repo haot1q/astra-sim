@@ -25,6 +25,7 @@ namespace AstraSim {
 
 class Sys;
 class DataSet;
+class ExternalMemoryService;
 
 MemoryOperation memory_operation_for_node_type(
     ChakraProtoMsg::NodeType node_type);
@@ -41,10 +42,11 @@ class Workload : public Callable {
 
     // event-based simulation
     void issue_dep_free_nodes();
-    void issue(std::shared_ptr<Chakra::ETFeederNode> node);
+    enum class IssueResult { Handled, Retry };
+    IssueResult issue(std::shared_ptr<Chakra::ETFeederNode> node);
     void issue_replay(std::shared_ptr<Chakra::ETFeederNode> node);
     // void issue_remote_mem(std::shared_ptr<Chakra::ETFeederNode> node); integrated into issue_mem
-    void issue_mem(std::shared_ptr<Chakra::ETFeederNode> node);
+    IssueResult issue_mem(std::shared_ptr<Chakra::ETFeederNode> node);
     void issue_memory_movement(std::shared_ptr<Chakra::ETFeederNode> node);
     void complete_memory_wait(const std::shared_ptr<Chakra::ETFeederNode>& node,
                               uint32_t expected_iteration);
@@ -58,6 +60,7 @@ class Workload : public Callable {
     void skip_invalid(std::shared_ptr<Chakra::ETFeederNode> node);
     void call(EventType event, CallData* data);
     void fire();
+    void bind_external_service(std::shared_ptr<ExternalMemoryService> service);
     void add_workload(const std::string& new_filename,
                       const std::vector<Sys*>& systems);
     void sleep_workload(const std::vector<Sys*>& systems);
@@ -88,6 +91,8 @@ class Workload : public Callable {
     std::queue<PendingWorkload> pending_workloads;
 
   private:
+    std::shared_ptr<ExternalMemoryService> external_service_;
+    bool fired_ = false;
     void initialize_collective_scopes(const std::string& filename);
     CommunicatorGroup* prepare_collective_scope(
         const std::shared_ptr<Chakra::ETFeederNode>& node,
