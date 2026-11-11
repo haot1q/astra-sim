@@ -99,6 +99,12 @@ bool ChakraEtWorkloadFeeder::hasNodesToIssue() {
     return feeder_.hasNodesToIssue();
 }
 
+std::shared_ptr<const JointNodeAccess> ChakraEtWorkloadFeeder::jointAccessLease(
+    const ChakraProtoMsg::Node& node, uint32_t rank, uint32_t iteration) const {
+    const auto* access = jointAccess(node, rank, iteration);
+    return access ? std::shared_ptr<const JointNodeAccess>(joint_index_, access) : nullptr;
+}
+
 std::shared_ptr<Chakra::ETFeederNode>
 ChakraEtWorkloadFeeder::getNextIssuableNode() {
     auto node = feeder_.getNextIssuableNode();

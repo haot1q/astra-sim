@@ -249,7 +249,8 @@ std::shared_ptr<JointSourceContext> JointSourceContext::load(const std::string& 
     identity = read_json(path, result->limits_, result->limits_.context_bytes, raw);
     ServiceBindingJson::fields(identity, {"schema", "mode", "run_id", "source_provenance_digest",
         "source_profile", "source_selection_sha256", "ranks", "limits"});
-    if (identity.at("schema") != "joint-source-context-v1" || identity.at("mode") != "association_only") {
+    if (identity.at("schema") != "joint-source-context-v1" ||
+        (identity.at("mode") != "association_only" && identity.at("mode") != "external_source_service")) {
         throw std::invalid_argument("joint access: unsupported context version/mode");
     }
     text(identity.at("run_id"));

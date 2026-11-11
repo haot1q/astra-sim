@@ -14,6 +14,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/WorkloadLayerHandlerData.hh"
 #include "astra-sim/system/AstraMemoryAPI.hh"
 #include "astra-sim/system/memory/MemoryMovementExecutor.hh"
+#include "astra-sim/system/memory/ExternalMemoryService.hh"
 #include "astra-sim/system/memory/UcieTransport.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include "astra-sim/workload/IndexedTemplateWorkloadFeeder.hh"
@@ -192,6 +193,7 @@ void Workload::report_template_metrics() const {
 }
 
 Workload::~Workload() {
+    if (external_service_) external_service_->retire(*this);
     if (this->comm_group != nullptr) {
         delete this->comm_group;
     }
@@ -411,7 +413,7 @@ void Workload::issue_dep_free_nodes() {
         if (node->has_other_attr("dependency_delay_schema") ||
             node->has_other_attr("dependency_delay_ns") ||
             hw_resource->is_available(node)) {
-            issue(node);
+            if (issue(node) == IssueResult::Retry) push_back_queue.push(node);
         } else {
             push_back_queue.push(node);
         }
@@ -426,11 +428,11 @@ void Workload::issue_dep_free_nodes() {
     sys->memory_movement_executor->dispatch();
 }
 
-void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
+Workload::IssueResult Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
     try {
         if (const auto delay = dependency_delay_ns(node)) {
             issue_dependency_delay(node, *delay);
-            return;
+            return IssueResult::Handled;
         }
     } catch (const std::exception& error) {
         // Sys::call_events otherwise swallows callback exceptions and strands
@@ -449,11 +451,11 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
             pending_memory_waits_.erase(node->id());
             skip_invalid(node);
         }
-        return;
+        return IssueResult::Handled;
     }
     if (sys->memory_movement_executor->is_movement_node(node)) {
         issue_memory_movement(node);
-        return;
+        return IssueResult::Handled;
     }
     if (sys->replay_only) {
         hw_resource->occupy(node);
@@ -469,7 +471,7 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
                               node->name(),
                               static_cast<uint64_t>(node->type()));
             }
-            issue_mem(node);
+            return issue_mem(node);
         } else if (node->is_cpu_op() ||
                    (!node->is_cpu_op() &&
                     node->type() == ChakraNodeType::COMP_NODE)) {
@@ -507,6 +509,7 @@ void Workload::issue(shared_ptr<Chakra::ETFeederNode> node) {
             skip_invalid(node);
         }
     }
+    return IssueResult::Handled;
 }
 
 void Workload::issue_memory_movement(
@@ -587,6 +590,8 @@ void Workload::record_parent_completion(
 }
 
 void Workload::reset_iteration_tracking() {
+    if (external_service_ && external_service_->pending_for(*this))
+        throw std::logic_error("cannot replace ET with pending external memory");
     if (!pending_dependency_delays_.empty()) {
         throw std::logic_error("cannot replace ET with pending dependency delays");
     }
@@ -628,7 +633,17 @@ void Workload::issue_replay(shared_ptr<Chakra::ETFeederNode> node) {
     - node->tensor_loc()
     INVALID_MEMORY = 0, LOCAL_MEMORY = 1, REMOTE_MEMORY = 2, CXL_MEMORY = 3 STORAGE_MEMORY = 4
 */
-void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
+Workload::IssueResult Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
+    if (external_service_) {
+        auto access = et_feeder->jointAccessLease(*node->getChakraNode(), sys->id, iteration);
+        if (access) {
+            const auto accepted = external_service_->submit(*this, node->id(), std::move(access),
+                memory_operation_for_node_type(node->type()));
+            if (accepted == ExternalMemoryService::Admission::Rejected) return IssueResult::Retry;
+            hw_resource->occupy(node);
+            return IssueResult::Handled;
+        }
+    }
     et_feeder->jointAccess(*node->getChakraNode(), static_cast<uint32_t>(sys->id), iteration);
     hw_resource->occupy(node);
 
@@ -669,6 +684,7 @@ void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
         delete wlhd;
         exit(EXIT_FAILURE);
     }
+    return IssueResult::Handled;
 }
 
 void Workload::issue_comp(shared_ptr<Chakra::ETFeederNode> node) {
@@ -884,7 +900,7 @@ void Workload::call(EventType event, CallData* data) {
         if (data == nullptr) {
             issue_dep_free_nodes();
         } else {
-            WorkloadLayerHandlerData* wlhd = (WorkloadLayerHandlerData*)data;
+            std::unique_ptr<WorkloadLayerHandlerData> wlhd(static_cast<WorkloadLayerHandlerData*>(data));
             shared_ptr<Chakra::ETFeederNode> node =
                 et_feeder->lookupNode(wlhd->node_id);
 
@@ -911,7 +927,6 @@ void Workload::call(EventType event, CallData* data) {
             issue_dep_free_nodes();
 
             remove_completed_node(wlhd->node_id);
-            delete wlhd;
         }
     }
 
@@ -1114,7 +1129,17 @@ void Workload::sleep_workload(const std::vector<Sys*>& systems) {
 }
 
 void Workload::fire() {
+    if (sys->joint_source_context && sys->joint_source_context->identity().at("mode") == "external_source_service"
+        && !external_service_) throw std::logic_error("external source service requires provider before first fire");
+    if (external_service_) external_service_->rethrow_failure();
+    fired_ = true;
     call(EventType::General, NULL);
+}
+
+void Workload::bind_external_service(std::shared_ptr<ExternalMemoryService> service) {
+    if (!service || external_service_ || fired_) throw std::logic_error("external service binding must precede first fire");
+    service->bind(*this);
+    external_service_ = std::move(service);
 }
 
 void Workload::report() {

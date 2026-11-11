@@ -101,6 +101,13 @@ endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     if(BUILD_TESTING)
+        # Python generates the original Source -> converter -> finalized ET fixture.
+        add_executable(AstraSim_ExternalMemoryService_Test tests/ExternalMemoryServiceTest.cc
+            congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+        target_link_libraries(AstraSim_ExternalMemoryService_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
+        target_include_directories(AstraSim_ExternalMemoryService_Test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
         add_executable(AstraSim_CollectiveScope_Test tests/CollectiveScopeIdentityTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
         target_link_libraries(AstraSim_CollectiveScope_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
