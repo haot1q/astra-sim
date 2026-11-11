@@ -19,6 +19,8 @@ void CmdLineParser::define_options() noexcept {
     options.set_width(70).allow_unrecognised_options().add_options()(
         "workload-configuration", "Workload configuration file",
         cxxopts::value<std::string>())(
+        "joint-source-context", "Expected Source association context (optional)",
+        cxxopts::value<std::string>()->default_value(""))(
         "comm-group-configuration", "Communicator group configuration fi`le",
         cxxopts::value<std::string>()->default_value("empty"))(
         "system-configuration", "System configuration file",

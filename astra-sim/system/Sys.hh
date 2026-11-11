@@ -82,7 +82,8 @@ class Sys : public Callable {
         double comm_scale,
         bool rendezvous_enabled,
         UcieLinkRegistry ucie_links = UcieLinkRegistry(),
-        MovementPathRegistry movement_paths = MovementPathRegistry());
+        MovementPathRegistry movement_paths = MovementPathRegistry(),
+        std::shared_ptr<JointSourceContext> joint_source = nullptr);
     ~Sys();
     //---------------------------------------------------------------------------
 
@@ -273,6 +274,7 @@ class Sys : public Callable {
 
     // workload
     Workload* workload;
+    std::shared_ptr<JointSourceContext> joint_source_context;
 
     // roofline model
     bool roofline_enabled;

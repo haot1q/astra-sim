@@ -53,6 +53,9 @@ MemoryOperation AstraSim::memory_operation_for_node_type(
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     this->sys = sys;
+    if (sys->joint_source_context && et_filename.rfind("template-", 0) == 0) {
+        throw invalid_argument("joint association mode does not support Template workloads");
+    }
     if (et_filename == "template-v2-idle" || et_filename == "template-v3-idle") {
         this->et_feeder = new TemplateIdleWorkloadFeeder();
     } else {
@@ -75,7 +78,7 @@ Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
             LoggerFactory::get_logger("workload")->critical(error_msg);
             exit(EXIT_FAILURE);
         }
-        this->et_feeder = load_et_feeder(workload_filename);
+        this->et_feeder = load_et_feeder(workload_filename, 0);
     }
     this->comm_group = nullptr;
     this->hw_resource = new HardwareResource(1);
@@ -86,8 +89,9 @@ Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     this->is_sleep = false;
 }
 
-WorkloadFeeder* Workload::load_et_feeder(const string& workload_filename) {
-    auto* feeder = new ChakraEtWorkloadFeeder(workload_filename);
+WorkloadFeeder* Workload::load_et_feeder(const string& workload_filename, uint32_t expected_iteration) {
+    auto* feeder = new ChakraEtWorkloadFeeder(workload_filename, sys->joint_source_context,
+        static_cast<uint32_t>(sys->id), expected_iteration, &sys->memory_tiers);
     try {
         validate_feeder(*feeder);
         ++et_read_count_;
@@ -151,7 +155,7 @@ unique_ptr<WorkloadFeeder> Workload::prepare_template_feeder(
     return feeder;
 }
 
-void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder) {
+void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder, bool start) {
     if (feeder == nullptr) {
         throw invalid_argument("cannot install a null workload feeder");
     }
@@ -160,7 +164,7 @@ void Workload::install_feeder(unique_ptr<WorkloadFeeder> feeder) {
     et_feeder = feeder.release();
     ++iteration;
     is_finished = false;
-    fire();
+    if (start) fire();
 }
 
 void Workload::report_template_metrics() const {
@@ -625,6 +629,7 @@ void Workload::issue_replay(shared_ptr<Chakra::ETFeederNode> node) {
     INVALID_MEMORY = 0, LOCAL_MEMORY = 1, REMOTE_MEMORY = 2, CXL_MEMORY = 3 STORAGE_MEMORY = 4
 */
 void Workload::issue_mem(shared_ptr<Chakra::ETFeederNode> node) {
+    et_feeder->jointAccess(*node->getChakraNode(), static_cast<uint32_t>(sys->id), iteration);
     hw_resource->occupy(node);
 
     WorkloadLayerHandlerData* wlhd = new WorkloadLayerHandlerData;
@@ -930,7 +935,7 @@ void Workload::call(EventType event, CallData* data) {
             unique_ptr<WorkloadFeeder> next_feeder =
                 std::move(next_workload.prepared_feeder);
             if (next_feeder == nullptr) {
-                next_feeder.reset(load_et_feeder(next_workload.et_filename));
+                next_feeder.reset(load_et_feeder(next_workload.et_filename, iteration + 1));
             }
             reset_iteration_tracking();
             delete et_feeder;
@@ -950,6 +955,10 @@ void Workload::call(EventType event, CallData* data) {
 
 void Workload::add_workload(const std::string& new_filename,
                             const std::vector<Sys*>& systems) {
+    if (sys->joint_source_context) {
+        add_joint_workload(new_filename, systems);
+        return;
+    }
     if (new_filename.rfind("template-v2", 0) == 0 ||
         new_filename.rfind("template-v3", 0) == 0) {
         const auto keyword = new_filename.substr(0, 11);
@@ -1014,7 +1023,7 @@ void Workload::add_workload(const std::string& new_filename,
             if (managed_sys->workload->et_feeder != nullptr)
                 delete managed_sys->workload->et_feeder;
             managed_sys->workload->et_feeder =
-                managed_sys->workload->load_et_feeder(workload_filename);
+                managed_sys->workload->load_et_feeder(workload_filename, managed_sys->workload->iteration + 1);
             managed_sys->workload->reset_iteration_tracking();
             managed_sys->workload->iteration++;
             managed_sys->workload->is_finished = false;
@@ -1044,7 +1053,49 @@ void Workload::add_workload(const std::string& new_filename,
         return;
     }
 
-    install_feeder(unique_ptr<WorkloadFeeder>(load_et_feeder(workload_filename)));
+    install_feeder(unique_ptr<WorkloadFeeder>(load_et_feeder(workload_filename, iteration + 1)));
+}
+
+void Workload::add_joint_workload(const std::string& prefix, const std::vector<Sys*>& systems) {
+    if (prefix.rfind("template-", 0) == 0) {
+        throw invalid_argument("joint association mode does not support Template workloads");
+    }
+    vector<Workload*> targets;
+    set<Workload*> seen;
+    for (auto* system : systems) {
+        if (!system || !system->workload || !seen.insert(system->workload).second ||
+            system->joint_source_context != sys->joint_source_context) {
+            throw invalid_argument("joint workload has invalid or duplicate managed rank");
+        }
+        targets.push_back(system->workload);
+    }
+    if (!seen.insert(this).second) throw invalid_argument("joint workload repeats controller rank");
+    targets.push_back(this);
+    vector<PendingWorkload> prepared;
+    prepared.reserve(targets.size());
+    for (auto* target : targets) {
+        const auto queued = target->pending_workloads.size();
+        if (queued >= UINT32_MAX || target->iteration >= UINT32_MAX - queued ||
+            ((!target->is_finished || queued) &&
+             queued >= sys->joint_source_context->limits().pending_graphs_per_rank)) {
+            throw invalid_argument("joint workload iteration or pending graph budget");
+        }
+        const auto path = prefix + "." + to_string(target->sys->id) + ".et";
+        auto feeder = unique_ptr<WorkloadFeeder>(target->load_et_feeder(
+            path, static_cast<uint32_t>(target->iteration + queued + 1)));
+        prepared.push_back(PendingWorkload{path, std::move(feeder)});
+    }
+    vector<Workload*> installed;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        auto* target = targets[i];
+        if (target->is_finished && target->pending_workloads.empty()) {
+            target->install_feeder(std::move(prepared[i].prepared_feeder), false);
+            installed.push_back(target);
+        } else {
+            target->pending_workloads.push(std::move(prepared[i]));
+        }
+    }
+    for (auto* target : installed) target->fire();
 }
 
 void Workload::sleep_workload(const std::vector<Sys*>& systems) {

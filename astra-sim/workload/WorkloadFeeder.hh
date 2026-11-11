@@ -14,6 +14,7 @@ LICENSE file in the root directory of this source tree.
 #include <vector>
 
 #include "extern/graph_frontend/chakra/src/feeder/et_feeder.h"
+#include "astra-sim/workload/JointAccessIndex.hh"
 
 namespace AstraSim {
 
@@ -38,6 +39,8 @@ class WorkloadFeeder {
     virtual std::optional<uint32_t> serviceRank() const = 0;
     virtual bool isTemplateV2() const { return false; }
     virtual bool isTemplateV3() const { return false; }
+    virtual const JointNodeAccess* jointAccess(const ChakraProtoMsg::Node&,
+                                              uint32_t, uint32_t) const { return nullptr; }
 };
 
 class TemplateIdleWorkloadFeeder final : public WorkloadFeeder {
@@ -63,7 +66,10 @@ class TemplateIdleWorkloadFeeder final : public WorkloadFeeder {
 
 class ChakraEtWorkloadFeeder final : public WorkloadFeeder {
   public:
-    explicit ChakraEtWorkloadFeeder(const std::string& filename);
+    explicit ChakraEtWorkloadFeeder(const std::string& filename,
+        std::shared_ptr<JointSourceContext> context = nullptr,
+        uint32_t rank = 0, uint32_t iteration = 0,
+        const MemoryTierRegistry* tiers = nullptr);
 
     std::size_t readyNodeCount() const { return feeder_.readyNodeCount(); }
     bool hasNodesToIssue() override;
@@ -80,8 +86,11 @@ class ChakraEtWorkloadFeeder final : public WorkloadFeeder {
     const std::string& serviceBindingDigest() const override;
     const std::string& serviceActivationId() const override;
     std::optional<uint32_t> serviceRank() const override;
+    const JointNodeAccess* jointAccess(const ChakraProtoMsg::Node& node,
+                                      uint32_t rank, uint32_t iteration) const override;
 
   private:
+    std::unique_ptr<JointAccessIndex> joint_index_;
     Chakra::ETFeeder feeder_;
 };
 

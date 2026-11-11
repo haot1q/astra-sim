@@ -61,7 +61,8 @@ class Workload : public Callable {
     void add_workload(const std::string& new_filename,
                       const std::vector<Sys*>& systems);
     void sleep_workload(const std::vector<Sys*>& systems);
-    WorkloadFeeder* load_et_feeder(const std::string& workload_filename);
+    WorkloadFeeder* load_et_feeder(const std::string& workload_filename,
+                                 uint32_t expected_iteration);
 
     // stats
     void report();
@@ -99,7 +100,9 @@ class Workload : public Callable {
     std::unique_ptr<WorkloadFeeder> prepare_template_feeder(
         const std::string& command);
     void validate_feeder(const WorkloadFeeder& feeder) const;
-    void install_feeder(std::unique_ptr<WorkloadFeeder> feeder);
+    void install_feeder(std::unique_ptr<WorkloadFeeder> feeder, bool start = true);
+    void add_joint_workload(const std::string& new_filename,
+                            const std::vector<Sys*>& systems);
     void report_template_metrics() const;
     void record_parent_completion(
         const std::shared_ptr<Chakra::ETFeederNode>& node);

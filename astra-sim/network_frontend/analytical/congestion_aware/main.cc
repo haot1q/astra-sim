@@ -32,6 +32,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionAware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--joint-source-association-capability") {
+        std::cout << "joint-source-association-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--dependency-delay-capability") {
         std::cout << "dependency-delay-v1" << std::endl;
         return 0;
@@ -106,6 +110,12 @@ int main(int argc, char* argv[]) {
         cmd_line_parser.get<std::string>("physical-service-bindings"), npus_count,
         cmd_line_parser.get<std::string>("pd-path-service-bindings"));
 
+    const auto joint_path = cmd_line_parser.get<std::string>("joint-source-context");
+    auto joint_context = joint_path.empty() ? nullptr : JointSourceContext::load(joint_path);
+    if (joint_context && joint_context->rank_count() != static_cast<size_t>(npus_count)) {
+        throw std::invalid_argument("joint source ranks differ from actual system count");
+    }
+
     auto systems = std::vector<Sys*>();
 
     auto queues_per_dim = std::vector<int>();
@@ -122,7 +132,7 @@ int main(int argc, char* argv[]) {
                     memory_config.manifest_digest, network_api.get(),
                     npus_count_per_dim, queues_per_dim, injection_scale,
                     comm_scale, rendezvous_protocol, services.at(i).ucie,
-                    services.at(i).movement);
+                    services.at(i).movement, joint_context);
 
         // push back network and system
         network_apis.push_back(std::move(network_api));

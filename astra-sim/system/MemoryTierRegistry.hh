@@ -83,6 +83,10 @@ class MemoryTierRegistry {
         return bindings_.size();
     }
 
+    const std::string& tier_name(MemoryTierId tier_id) const {
+        return names_by_id_.at(tier_id);
+    }
+
     ServiceBindingIdentity service_identity() const {
         const auto identity = bindings_.begin()->second.service_identity;
         for (const auto& [id, binding] : bindings_) {
