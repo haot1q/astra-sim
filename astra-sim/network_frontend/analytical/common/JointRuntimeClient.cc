@@ -8,7 +8,11 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <openssl/evp.h>
+#include "astra-sim/workload/JointAccessIo.hh"
 #include <limits>
+#include <memory>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
@@ -33,6 +37,40 @@ uint64_t JointRuntimeClient::decimal(const Json& value) {
         result = result * 10 + c - '0';
     }
     return result;
+}
+
+std::string JointRuntimeClient::original(const Json& ref, uint64_t cap, bool retain) {
+    AstraSim::ServiceBindingJson::fields(ref, {"path", "size_bytes", "sha256"});
+    const auto path = ref.at("path").get<std::string>();
+    if (std::filesystem::canonical(path).string() != path || !std::filesystem::is_regular_file(path))
+        throw std::invalid_argument("activation requires a canonical regular original");
+    const auto before = AstraSim::JointAccessIo::file_identity(path);
+    const auto expected = decimal(ref.at("size_bytes"));
+    if (expected > cap || std::filesystem::file_size(path) != expected)
+        throw std::invalid_argument("activation original byte limit");
+    std::ifstream input(path, std::ios::binary);
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("activation SHA init failed");
+    char buffer[65536];
+    uint64_t count = 0;
+    std::string contents;
+    while (input.read(buffer, sizeof(buffer)) || input.gcount()) {
+        count += input.gcount();
+        if (count > cap || EVP_DigestUpdate(hash.get(), buffer, input.gcount()) != 1)
+            throw std::runtime_error("activation original read exceeded budget");
+        if (retain) contents.append(buffer, input.gcount());
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    if (!input.eof() || count != expected || before != AstraSim::JointAccessIo::file_identity(path) ||
+        EVP_DigestFinal_ex(hash.get(), digest, &length) != 1 || length != 32)
+        throw std::runtime_error("activation original changed or hash failed");
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < length; ++i) hex << std::setw(2) << static_cast<unsigned>(digest[i]);
+    if (hex.str() != ref.at("sha256")) throw std::invalid_argument("activation original SHA differs");
+    return contents;
 }
 
 std::vector<pid_t> JointRuntimeClient::children() {
@@ -144,11 +182,15 @@ std::string JointRuntimeClient::transact(const std::string& frame) {
         if (left <= 0) throw std::runtime_error("runtime host IPC timeout");
         if (std::filesystem::file_size(stderr_path_) >= log_limit_)
             throw std::runtime_error("runtime stderr budget exhausted");
-        pollfd fds[2]{{output_, POLLIN, 0}, {sent < frame.size() ? input_ : -1, POLLOUT, 0}};
-        if (poll(fds, 2, static_cast<int>(std::min<int64_t>(left, 100))) < 0) {
+        // Cancellation observes HUP only: the original workload reader owns stdin bytes.
+        pollfd fds[3]{{output_, POLLIN, 0}, {sent < frame.size() ? input_ : -1, POLLOUT, 0},
+                      {config_.contains("activation") ? STDIN_FILENO : -1, 0, 0}};
+        if (poll(fds, 3, static_cast<int>(std::min<int64_t>(left, 100))) < 0) {
             if (errno == EINTR) continue;
             throw std::runtime_error("runtime poll failed");
         }
+        if (fds[2].revents & (POLLHUP | POLLERR | POLLNVAL))
+            throw std::runtime_error("activation host input closed");
         if (fds[1].revents & POLLOUT) {
             const auto count = write(input_, frame.data() + sent, frame.size() - sent);
             if (count > 0) sent += count;

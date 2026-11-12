@@ -2,12 +2,24 @@
 #include "ExternalMemoryFixture.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include <fstream>
+#include <iomanip>
+#include <map>
+#include <openssl/sha.h>
+#include <sstream>
 #include <set>
 #include <sys/prctl.h>
 #include <unistd.h>
 
 using Coordinator = AstraSimAnalytical::JointSimulationCoordinator;
 using Json = Coordinator::Json;
+namespace AstraSimAnalytical {
+struct JointCoordinatorTestAccess {
+    static Json start(const std::shared_ptr<JointSimulationCoordinator>& owner, const Json& ref,
+                      const Json& facts, uint64_t epoch) {
+        return owner->start_service(ref, facts, epoch);
+    }
+};
+}
 namespace {
 struct ExpectedBoundedStop {};
 void observe_prefix(const std::shared_ptr<Coordinator>& owner, const std::vector<AstraSim::Sys*>& systems,
@@ -75,6 +87,140 @@ Json empty_status() {
     return Json{{"ready", false}, {"completions", Json::array()}, {"domains", Json::array()},
         {"endpoints", Json::array()}, {"completed_nodes", "0"}, {"admitted_nodes", "0"},
         {"accepted_prefix", "0"}, {"native_state", "NEW"}, {"business_not_before_fs", "0"}, {"supply_idle", Json::object()}};
+}
+
+void activation_contract() {
+    auto queue = std::make_shared<NetworkAnalytical::EventQueue>();
+    auto config = configuration();
+    config["activation"] = {{"schema", "simulator-first-activation-v1"}, {"manifest_path", "/unpublished"}};
+    config["limits"]["no_progress_events"] = "1";
+    auto status = empty_status();
+    std::vector<std::string> calls;
+    auto owner = std::make_shared<Coordinator>(queue, config, [&](const auto& command, const auto& body) {
+        calls.push_back(command);
+        if (command == "activate") {
+            require(body.at("epoch_fs") == "100000000", "epoch differs from original queue cut");
+            status["endpoints"] = Json::array({{{"id", "e"}, {"state", "BOOTSTRAP"}, {"next_fs", "107000000"}}});
+        } else if (command == "step_at") {
+            require(body.at("time_fs") == "107000000", "global READY lost local initialization cost");
+            status["ready"] = true;
+            status["business_not_before_fs"] = "107000000";
+            status["endpoints"][0]["next_fs"] = nullptr;
+        }
+        return status;
+    });
+    require(calls.empty(), "awaiting constructor opened a lower service");
+    rejects([&] { owner->try_submit(Coordinator::Service::NodeRequest{}); }, "invalid or repeated");
+    rejects([&] { owner->activate(Json::object()); }, "activation requires");
+    for (auto when : {1, 2, 100}) owner->deadline(0, when, when);
+    for (int i = 0; i < 3; ++i) owner->advance();
+    require(queue->get_current_time() == 100 && calls.empty(), "control phase advanced a lower clock");
+    const auto ready = AstraSimAnalytical::JointCoordinatorTestAccess::start(owner,
+        {{"sha256", std::string(64, 'a')}}, {{"execution_iteration", "5"}}, 100000000);
+    require(ready.at("anchor_ns") == "107" && queue->get_current_time() == 107 &&
+            ready.at("business_not_before_fs") == "107000000" && calls == std::vector<std::string>{"activate", "step_at"},
+            "activation marker did not execute on the original receive queue");
+    rejects([&] { owner->activate(Json::object()); }, "activation requires");
+    owner->abort();
+}
+
+Json manifest_ref(const std::filesystem::path& path, const Json& value) {
+    const auto raw = value.dump();
+    std::ofstream output(path);
+    output << raw;
+    output.close();
+    require(bool(output), "activation test manifest write failed");
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(raw.data()), raw.size(), digest);
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (auto byte : digest) hex << std::setw(2) << static_cast<unsigned>(byte);
+    return {{"path", path.string()}, {"size_bytes", std::to_string(raw.size())}, {"sha256", hex.str()}};
+}
+
+void bound_activation(const std::filesystem::path& root, const std::string& scenario) {
+    ExternalMemoryTests::Fixture fixture(root, {256, 1048576, 4096}, false);
+    auto config = configuration();
+    config["run_id"] = fixture.context->identity().at("run_id");
+    config["activation"] = {{"schema", "simulator-first-activation-v1"},
+        {"manifest_path", (root / "activation.json").string()}};
+    auto status = empty_status();
+    status["source_context"] = fixture.context->identity();
+    unsigned calls = 0;
+    uint64_t ready_fs = 0;
+    auto owner = std::make_shared<Coordinator>(fixture.events, config, [&](const auto& command, const auto& body) {
+        ++calls;
+        if (command == "activate") {
+            ready_fs = std::stoull(body.at("epoch_fs").template get<std::string>()) + 7000000;
+            status["endpoints"] = Json::array({{{"id", "e"}, {"state", "BOOTSTRAP"},
+                {"next_fs", std::to_string(ready_fs)}}});
+        } else if (command == "step_at") {
+            require(body.at("time_fs") == std::to_string(ready_fs), "activation skipped original READY cost");
+            status["ready"] = true;
+            status["business_not_before_fs"] = std::to_string(ready_fs);
+            status["endpoints"][0]["next_fs"] = nullptr;
+        }
+        return status;
+    });
+    owner->bind(fixture.context, {&fixture.work(0), &fixture.work(1)});
+    fixture.fire();
+    for (unsigned step = 0; !fixture.work(0).is_finished || !fixture.work(1).is_finished; ++step) {
+        require(step < 100, "original bootstrap did not drain");
+        owner->advance();
+    }
+    std::ifstream input(root / "activation-input.json");
+    Json manifest;
+    input >> manifest;
+    for (unsigned rank = 0; rank != 2; ++rank) {
+        require(fixture.work(rank).rank_completion_count == 1, "bootstrap did not complete exactly once");
+        fixture.work(rank).add_workload(manifest.at("control_prefix").get<std::string>(), {});
+    }
+    manifest.erase("control_prefix");
+    Json acks = Json::array();
+    std::map<unsigned, uint64_t> finished;
+    for (unsigned step = 0; finished.size() != 2; ++step) {
+        require(step < 100, "original forward controls did not drain");
+        owner->advance();
+        for (unsigned rank = 0; rank != 2; ++rank)
+            if (fixture.work(rank).rank_completion_count == 2 && !finished.count(rank))
+                finished[rank] = fixture.events->get_current_time();
+    }
+    require(calls == 0, "awaiting control phase contacted lower service");
+    for (const auto& [rank, when] : finished)
+        acks.push_back({{"rank", std::to_string(rank)}, {"iteration", std::to_string(fixture.work(rank).iteration)},
+            {"finish_ns", std::to_string(when)}});
+    const auto iteration = fixture.work(0).iteration;
+    auto facts = fixture.context->identity();
+    facts.update(Json{{"prepared_at_ns", std::to_string(fixture.events->get_current_time())},
+        {"model_sequence", "0"}, {"model_rounds_before", "0"}, {"execution_iteration", std::to_string(iteration + 1)},
+        {"control", {{"kind", "forward"}, {"iteration", std::to_string(iteration)}, {"acks", acks}}}});
+    if (scenario == "missing-ack") facts["control"]["acks"].erase(1);
+    if (scenario == "iteration") facts["control"]["acks"][1]["iteration"] = std::to_string(iteration + 1);
+    manifest["first_business"] = facts;
+    const auto ref = manifest_ref(root / "activation.json", manifest);
+    if (scenario == "missing-ack" || scenario == "iteration") {
+        rejects([&] { owner->activate(ref); }, scenario == "missing-ack" ? "complete original ranks" : "actual drained rank");
+        require(calls == 0, "invalid original ACK reached lower service");
+    } else {
+        const auto ready = owner->activate(ref);
+        require(ready.at("anchor_ns") == std::to_string(fixture.events->get_current_time()) &&
+                calls == 2 && ready_fs == fixture.events->get_current_time() * 1000000,
+                "public activation did not execute its actual READY callback");
+        const auto prefix = manifest.at("workload_prefix").get<std::string>();
+        rejects([&] { owner->check_workload(prefix + "-wrong", {}); }, "prefix changed");
+        if (scenario == "et" || scenario == "companion") {
+            std::ofstream changed(manifest["graphs"][0][scenario]["path"].get<std::string>(), std::ios::app);
+            changed << 'x';
+            changed.close();
+            rejects([&] { owner->check_workload(prefix, {&fixture.work(0)}); }, "original byte limit");
+        } else {
+            owner->check_workload(prefix, {&fixture.work(0)});
+            rejects([&] { owner->check_workload(prefix, {&fixture.work(0)}); }, "later business view");
+            owner->check_workload(prefix, {&fixture.work(1)});
+        }
+        rejects([&] { owner->activate(ref); }, "activation requires");
+    }
+    owner->abort();
 }
 
 void queue_contract(const std::string& scenario) {
@@ -205,7 +351,7 @@ void real_component(const std::string& config_path) {
             require(!stream.eof(), "test journal contains an incomplete observation frame");
             offset += line.size() + 1;
             const auto row = AstraSim::ServiceBindingJson::parse(line);
-            require(row.size() == 4 && JointRuntimeClient::decimal(row.at("observation_seq")) == observation++ &&
+            require(row.size() == 5 && JointRuntimeClient::decimal(row.at("observation_seq")) == observation++ &&
                 JointRuntimeClient::decimal(row.at("outer_seq")) == outer, "test observation sequence differs");
             const auto command = AstraSim::ServiceBindingJson::parse(row.at("native_command_utf8").get<std::string>());
             const auto reply = AstraSim::ServiceBindingJson::parse(row.at("native_reply_utf8").get<std::string>());
@@ -219,7 +365,11 @@ void real_component(const std::string& config_path) {
             for (const auto& event : reply.at("events")) {
                 if (event.at("kind") != "logical_completed") continue;
                 const auto identity = event.at("logical_id").get<std::string>();
-                const auto when = JointRuntimeClient::decimal(event.at("time_fs"));
+                const auto local = JointRuntimeClient::decimal(event.at("time_fs"));
+                const auto epoch = JointRuntimeClient::decimal(client->config().value("fixture_epoch_fs", Json("0")));
+                const auto when = JointRuntimeClient::decimal(row.at("global_completions").at(identity));
+                require(local <= UINT64_MAX - epoch && when == local + epoch,
+                        "diagnostic observer differs from the runtime epoch boundary");
                 require(owner && event.size() == 4 && client->config().at("binding").contains(event.at("domain_id").get<std::string>()) &&
                         scheduled.size() < 10 && scheduled.insert(identity).second,
                         "unknown or duplicate finite diagnostic completion");
@@ -240,6 +390,16 @@ void real_component(const std::string& config_path) {
         ++outer;
         return reply;
     });
+    if (client->config().contains("fixture_epoch_fs")) {
+        const auto epoch = JointRuntimeClient::decimal(client->config().at("fixture_epoch_fs"));
+        require(epoch && epoch % 1000000 == 0, "diagnostic epoch must be a nonzero original ns edge");
+        owner->deadline(0, epoch / 1000000, 0);
+        owner->advance();
+        require(outer == 0 && queue->get_current_time() == epoch / 1000000,
+                "diagnostic lower service started during the original control interval");
+        AstraSimAnalytical::JointCoordinatorTestAccess::start(owner,
+            {{"sha256", std::string(64, 'd')}}, {{"execution_iteration", "0"}}, epoch);
+    }
     while (completed.size() != 10 || !queue->finished()) owner->advance();
     const std::set<std::string> expected{"cold", "hit", "masked", "masked-hit", "evict", "reread",
         "warm-other-set", "lpddr", "slow-miss", "hit-during-miss"};
@@ -285,8 +445,13 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    if (mode == "unit") queue_contract(argv[2]);
+    if (mode == "unit" && std::string(argv[2]) == "activation") activation_contract();
+    else if (mode == "unit") queue_contract(argv[2]);
     else if (mode == "component") real_component(argv[2]);
+    else if (mode == "activation-bound" && argc == 4) {
+        AstraSim::LoggerFactory::init("empty");
+        bound_activation(argv[2], argv[3]);
+    }
     else if (mode == "capacity") {
         AstraSim::LoggerFactory::init("empty");
         global_capacity(argv[2]);
