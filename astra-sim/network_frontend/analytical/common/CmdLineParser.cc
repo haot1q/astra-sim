@@ -16,6 +16,8 @@ CmdLineParser::CmdLineParser(const char* const argv0) noexcept
 }
 
 void CmdLineParser::define_options() noexcept {
+    options.add_options()("joint-runtime-config", "Persistent external joint runtime configuration",
+                          cxxopts::value<std::string>()->default_value(""));
     options.set_width(70).allow_unrecognised_options().add_options()(
         "workload-configuration", "Workload configuration file",
         cxxopts::value<std::string>())(
