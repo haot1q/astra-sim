@@ -43,6 +43,9 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     auto cmd_line_parser = CmdLineParser(argv[0]);
     cmd_line_parser.parse(argc, argv);
+    if (!cmd_line_parser.get<std::string>("joint-runtime-config").empty()) {
+        throw std::invalid_argument("joint runtime supports only congestion-unaware frontend");
+    }
     if (!cmd_line_parser.get<std::string>("physical-memory-routes").empty() ||
         !cmd_line_parser.get<std::string>("memory-transport-summary").empty()) {
         throw std::invalid_argument("memory transport supports only congestion-unaware analytical frontend");

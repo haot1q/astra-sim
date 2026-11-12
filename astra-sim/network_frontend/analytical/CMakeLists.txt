@@ -101,6 +101,14 @@ endif()
 # Compile Congestion Unaware Backend
 if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
     if(BUILD_TESTING)
+        foreach(joint_target JointRuntimeClient JointSimulationCoordinator)
+            add_executable(AstraSim_${joint_target}_Test tests/${joint_target}Test.cc
+                congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
+            target_link_libraries(AstraSim_${joint_target}_Test PRIVATE AstraSim Analytical_Congestion_Unaware)
+            target_include_directories(AstraSim_${joint_target}_Test PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
+        endforeach()
         # Python generates the original Source -> converter -> finalized ET fixture.
         add_executable(AstraSim_ExternalMemoryService_Test tests/ExternalMemoryServiceTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})

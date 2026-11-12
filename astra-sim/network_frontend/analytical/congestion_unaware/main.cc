@@ -5,6 +5,7 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/common/Logging.hh"
 #include "common/CmdLineParser.hh"
+#include "common/JointSimulationCoordinator.hh"
 #include "congestion_unaware/CongestionUnawareNetworkApi.hh"
 #include <astra-network-analytical/common/EventQueue.h>
 #include <astra-network-analytical/common/NetworkParser.h>
@@ -33,6 +34,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--joint-runtime-capability") {
+        std::cout << "joint-runtime-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--joint-source-association-capability") {
         std::cout << "joint-source-association-v1" << std::endl;
         return 0;
@@ -142,6 +147,11 @@ int main(int argc, char* argv[]) {
 
     const auto joint_path = cmd_line_parser.get<std::string>("joint-source-context");
     auto joint_context = joint_path.empty() ? nullptr : JointSourceContext::load(joint_path);
+    const auto runtime_path = cmd_line_parser.get<std::string>("joint-runtime-config");
+    if (!runtime_path.empty() && (!joint_context ||
+        joint_context->identity().at("mode") != "external_source_service")) {
+        throw std::invalid_argument("joint runtime requires external_source_service context");
+    }
     if (joint_context && joint_context->rank_count() != static_cast<size_t>(npus_count)) {
         throw std::invalid_argument("joint source ranks differ from actual system count");
     }
@@ -232,7 +242,19 @@ int main(int argc, char* argv[]) {
       }
     }
 
+    std::shared_ptr<JointRuntimeClient> joint_client;
+    std::shared_ptr<JointSimulationCoordinator> joint;
     try {
+    if (!runtime_path.empty()) {
+        joint_client = std::make_shared<JointRuntimeClient>(runtime_path);
+        joint = std::make_shared<JointSimulationCoordinator>(event_queue, joint_client->config(),
+            [joint_client](const std::string& command, const nlohmann::json& body) {
+                return joint_client->exchange(command, body);
+            });
+        std::vector<Workload*> workloads;
+        for (auto* system : systems) workloads.push_back(system->workload);
+        joint->bind(joint_context, workloads);
+    }
     // Initiate simulation
     for (int i = 0; i < npus_count; i++) {
         systems[i]->workload->emit_rank_completions = rank_notifications;
@@ -339,6 +361,11 @@ int main(int argc, char* argv[]) {
     bool exit_requested = false;
     std::vector<uint64_t> observed_rank_completions(npus_count, 0);
     while (!exit) {
+      if (joint && exit_requested && all_systems_drained() && event_queue->finished() && !joint->pending_nodes()) {
+        joint->finish();
+        joint_client->close();
+        break;
+      }
       pd_kv_executor.rethrow_failure();
       preparation_executor.rethrow_failure();
       for (const auto* system : systems) {
@@ -349,7 +376,13 @@ int main(int argc, char* argv[]) {
       if (physical_routes) physical_routes->rethrow_failure();
       else services.rethrow_failure();
       bool asked_any = false;
-      if(!event_queue->finished()){
+      if (joint) {
+        joint->advance();
+#ifdef JOINT_RUNTIME_TEST_OBSERVE
+        JOINT_RUNTIME_TEST_OBSERVE(joint, systems, event_queue);
+#endif
+      }
+      else if(!event_queue->finished()){
         event_queue->proceed();
       }
       else {
@@ -372,7 +405,7 @@ int main(int argc, char* argv[]) {
         clear_suppression();
       }
       if (exit_requested) {
-        exit = all_systems_drained();
+        exit = !joint && all_systems_drained();
         continue;
       }
 
@@ -442,6 +475,7 @@ int main(int argc, char* argv[]) {
             } else {
               pass_gen[npu_id] = state_gen;
               pass_deadline[npu_id] = deadline;
+              if (joint && deadline > 0) joint->deadline(npu_id, deadline, state_gen);
             }
             continue;
           }
@@ -535,6 +569,7 @@ int main(int argc, char* argv[]) {
             } else {
               pass_gen[npu_id] = state_gen;
               pass_deadline[npu_id] = deadline;
+              if (joint && deadline > 0) joint->deadline(npu_id, deadline, state_gen);
             }
             continue;
           }
@@ -574,7 +609,7 @@ int main(int argc, char* argv[]) {
 
       if (asked_any) {
         unasked_rounds = 0;
-      } else if (++unasked_rounds >= kSuppressionBackstop) {
+      } else if (!joint && ++unasked_rounds >= kSuppressionBackstop) {
         // Should be unreachable: an in-flight workload always produces a
         // report, and an empty queue clears suppression outright. Kept so a
         // suppression bug degrades to a slow run instead of a silent hang.
@@ -584,6 +619,16 @@ int main(int argc, char* argv[]) {
     }
 
     } catch (...) {
+        if (joint) {
+            try { joint->abort(); }
+            catch (const std::exception& error) { std::cerr << "joint abort: " << error.what() << std::endl; }
+            catch (...) { std::cerr << "joint abort: unknown exception" << std::endl; }
+        }
+        if (joint_client) {
+            try { joint_client->stop_owned(); }
+            catch (const std::exception& error) { std::cerr << "joint owned stop: " << error.what() << std::endl; }
+            catch (...) { std::cerr << "joint owned stop: unknown exception" << std::endl; }
+        }
         if (physical_routes) physical_routes->abort(std::current_exception());
         services.write_memory_transport_summary(memory_summary, true);
         throw;
