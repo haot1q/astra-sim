@@ -1,5 +1,7 @@
 #include "common/JointSimulationCoordinator.hh"
 #include "astra-sim/workload/Workload.hh"
+#include "astra-sim/system/Sys.hh"
+#include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -40,7 +42,14 @@ JointSimulationCoordinator::JointSimulationCoordinator(
                             "no_progress_events", "horizon_fs", "supply_frames"}) limit(name);
     if (limit("pending_nodes") > 256 || limit("callbacks") > 65536 || limit("supply_frames") > 64)
         throw std::invalid_argument("joint runtime host admission limit");
-    call("open");
+    awaiting_ = config_.contains("activation");
+    if (awaiting_) {
+        AstraSim::ServiceBindingJson::fields(config_.at("activation"), {"schema", "manifest_path"});
+        if (config_.contains("source") || config_["activation"]["schema"] != "simulator-first-activation-v1")
+            throw std::invalid_argument("invalid deferred activation configuration");
+        status_ = {{"ready", false}, {"domains", Json::array()}, {"endpoints", Json::array()},
+            {"completions", Json::array()}, {"admitted_nodes", "0"}, {"completed_nodes", "0"}};
+    } else call("open");
 }
 
 void JointSimulationCoordinator::bind(std::shared_ptr<AstraSim::JointSourceContext> context,
@@ -49,18 +58,84 @@ void JointSimulationCoordinator::bind(std::shared_ptr<AstraSim::JointSourceConte
         context->identity().at("run_id") != config_.at("run_id"))
         throw std::invalid_argument("joint runtime requires its external Source context");
     for (const auto field : {"run_id", "source_provenance_digest", "source_selection_sha256", "ranks"})
-        if (context->identity().at(field) != status_.at("source_context").at(field))
+        if (!awaiting_ && context->identity().at(field) != status_.at("source_context").at(field))
             throw std::invalid_argument("runtime and original ET Source identity differ");
     service_ = std::make_shared<Service>(context, config_.at("session_id").get<std::string>(),
         std::make_shared<ProviderForward>(shared_from_this()),
         Service::Limits{limit("pending_nodes"), limit("descriptor_bytes"), 4096});
     for (auto* workload : workloads) workload->bind_external_service(service_);
+    context_ = context->identity();
+    workloads_ = workloads;
+}
+
+JointSimulationCoordinator::Json JointSimulationCoordinator::activate(const Json& ref) {
+    if (!awaiting_ || !activation_.is_null() || !service_ || !pending_.empty() ||
+        ref.at("path") != config_.at("activation").at("manifest_path"))
+        throw std::invalid_argument("activation requires the original unactivated service");
+    activation_ = AstraSim::ServiceBindingJson::parse(JointRuntimeClient::original(ref, 1U << 20, true));
+    const auto& facts = activation_.at("first_business");
+    const auto& control = facts.at("control");
+    const auto epoch = fs(queue_->get_current_time());
+    if (epoch != frontier_fs_ || fs(JointRuntimeClient::decimal(facts.at("prepared_at_ns"))) != epoch ||
+        control.at("kind") != "forward" || facts.at("model_sequence") != "0" || facts.at("model_rounds_before") != "0" ||
+        JointRuntimeClient::decimal(control.at("iteration")) + 1 != JointRuntimeClient::decimal(facts.at("execution_iteration")))
+        throw std::invalid_argument("activation differs from original forward safe point");
+    for (const auto field : {"run_id", "source_provenance_digest", "source_selection_sha256", "ranks"})
+        if (facts.at(field) != context_.at(field)) throw std::invalid_argument("activation Source context differs");
+    if (control.at("acks").size() != workloads_.size() || activation_.at("graphs").size() != workloads_.size())
+        throw std::invalid_argument("activation lacks complete original ranks");
+    for (size_t i = 0; i < workloads_.size(); ++i) {
+        const auto* workload = workloads_[i];
+        const auto& ack = control.at("acks").at(i);
+        const auto& graph = activation_.at("graphs").at(i);
+        if (!workload->is_finished || !workload->pending_workloads.empty() ||
+            JointRuntimeClient::decimal(ack.at("rank")) != static_cast<uint64_t>(workload->sys->id) ||
+            graph.at("rank") != ack.at("rank") || ack.at("iteration") != control.at("iteration") ||
+            workload->iteration != JointRuntimeClient::decimal(ack.at("iteration")) ||
+            fs(JointRuntimeClient::decimal(ack.at("finish_ns"))) > epoch)
+            throw std::invalid_argument("activation does not match the actual drained rank");
+        for (const auto kind : {"et", "companion"}) JointRuntimeClient::original(graph.at(kind), 256U << 20);
+    }
+    return start_service(ref, facts, epoch);
+}
+
+JointSimulationCoordinator::Json JointSimulationCoordinator::start_service(
+        const Json& ref, const Json& facts, uint64_t epoch) {
+    call("activate", {{"manifest", ref}, {"epoch_fs", std::to_string(epoch)}});
+    for (const auto field : {"run_id", "source_provenance_digest", "source_selection_sha256", "ranks"})
+        if (!context_.is_null() && status_.at("source_context").at(field) != context_.at(field))
+            throw std::invalid_argument("activated factory Source context differs");
+    while (!status_.at("ready").get<bool>()) advance();
+    Json ready;
+    enqueue_receive(JointRuntimeClient::decimal(status_.at("business_not_before_fs")), [&](Service::ReceiveEdge edge) {
+        ready = {{"schema", "simulator-joint-activation-ready-v1"}, {"run_id", config_.at("run_id")},
+            {"session_id", config_.at("session_id")}, {"manifest_sha256", ref.at("sha256")},
+            {"execution_iteration", facts.at("execution_iteration")}, {"epoch_fs", std::to_string(epoch)},
+            {"business_not_before_fs", status_.at("business_not_before_fs")}, {"anchor_ns", std::to_string(edge.visible_ns)}};
+    });
+    while (ready.is_null()) advance();
+    awaiting_ = false;
+    idle_events_ = 0;
+    return ready;
+}
+
+void JointSimulationCoordinator::check_workload(const std::string& prefix,
+        const std::vector<AstraSim::Workload*>& targets) {
+    if (awaiting_ || activation_.is_null()) return;
+    if (prefix != activation_.at("workload_prefix")) throw std::invalid_argument("activated workload prefix changed");
+    for (const auto* target : targets) {
+        const auto rank = static_cast<uint32_t>(target->sys->id);
+        if (!loaded_ranks_.insert(rank).second) throw std::invalid_argument("later business view is unsupported");
+        const auto& graph = activation_.at("graphs").at(rank);
+        if (JointRuntimeClient::decimal(graph.at("rank")) != rank) throw std::invalid_argument("graph rank differs");
+        for (const auto kind : {"et", "companion"}) JointRuntimeClient::original(graph.at(kind), 256U << 20);
+    }
 }
 
 JointSimulationCoordinator::Service::Admission JointSimulationCoordinator::try_submit(const Service::NodeRequest& r) {
     rethrow_failure();
     const Service::NodeKey key{r.identity.rank, r.identity.iteration, r.identity.node};
-    if (stopped_ || draining_ || !r.access || r.identity.run != config_.at("run_id") ||
+    if (awaiting_ || stopped_ || draining_ || !r.access || r.identity.run != config_.at("run_id") ||
         r.identity.session != config_.at("session_id") || pending_.count(key))
         throw std::invalid_argument("invalid or repeated original node promise");
     if (pending_.size() >= limit("pending_nodes") ||
@@ -171,7 +246,7 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::call(const std::str
 void JointSimulationCoordinator::safe_point() {
     rethrow_failure();
     if (stopped_) throw std::runtime_error("joint runtime has stopped");
-    if (!status_.at("ready").get<bool>() || draining_) return;
+    if (awaiting_ || !status_.at("ready").get<bool>() || draining_) return;
     Json nodes = Json::array();
     for (const auto& [key, r] : pending_) {
         if (sent_.count(key)) continue;
@@ -271,7 +346,7 @@ void JointSimulationCoordinator::advance() {
         JointRuntimeClient::decimal(status_.at("admitted_nodes"));
     idle_events_ = progress == progress_ ? idle_events_ + 1 : 0;
     progress_ = progress;
-    if (idle_events_ > limit("no_progress_events")) throw std::runtime_error("joint no-business-progress budget exhausted");
+    if (!awaiting_ && idle_events_ > limit("no_progress_events")) throw std::runtime_error("joint no-business-progress budget exhausted");
 }
 
 void JointSimulationCoordinator::finish() {

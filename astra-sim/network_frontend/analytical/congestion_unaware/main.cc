@@ -255,6 +255,21 @@ int main(int argc, char* argv[]) {
         for (auto* system : systems) workloads.push_back(system->workload);
         joint->bind(joint_context, workloads);
     }
+    const auto read_workload = [&]() {
+        std::string line;
+        if (!std::getline(std::cin, line)) throw std::runtime_error("workload input closed");
+        const std::string prefix = "joint-activate-v1 ";
+        if (line.rfind(prefix, 0) == 0) {
+            if (!joint || line.size() > (1U << 20)) throw std::invalid_argument("invalid activation command");
+            const auto ref = AstraSim::ServiceBindingJson::parse(line.substr(prefix.size()));
+            const auto ready = joint->activate(ref);
+            std::cout << "JOINT_ACTIVATION_READY_V1 " << ready.dump() << std::endl;
+            // No clock advance between the real marker and its workload consumption.
+            if (!std::getline(std::cin, line)) throw std::runtime_error("activated workload input closed");
+            joint->check_workload(line, {});
+        }
+        return line;
+    };
     // Initiate simulation
     for (int i = 0; i < npus_count; i++) {
         systems[i]->workload->emit_rank_completions = rank_notifications;
@@ -438,8 +453,7 @@ int main(int argc, char* argv[]) {
           systems[npu_id]->workload->report();
           AstraSim::LoggerFactory::get_logger("workload")->info("Waiting");
 
-          std::string new_filename;
-          std::getline(std::cin, new_filename);
+          std::string new_filename = read_workload();
           if (physical_routes && new_filename.rfind("pd-cache-", 0) == 0) {
             throw std::invalid_argument("physical routes do not support P/D Cache commands");
           }
@@ -501,10 +515,12 @@ int main(int argc, char* argv[]) {
             systems[npu_id]->workload->is_sleep = true;
           }
           else if (new_filename.rfind("template-v2", 0) == 0) {
+            if (joint) joint->check_workload(new_filename, {systems[npu_id]->workload});
             systems[npu_id]->workload->add_workload(new_filename, {});
           }
           else if (!preparation_executor.submit_command(new_filename) &&
                    !submit_pd_kv(new_filename)) {
+            if (joint) joint->check_workload(new_filename, {systems[npu_id]->workload});
             // Add new workload to this system
             systems[npu_id]->workload
                 ->add_workload(new_filename, {});
@@ -532,8 +548,7 @@ int main(int argc, char* argv[]) {
           systems[npu_id]->workload->report();
           AstraSim::LoggerFactory::get_logger("workload")->info("Waiting");
 
-          std::string new_filename;
-          std::getline(std::cin, new_filename);
+          std::string new_filename = read_workload();
           if (physical_routes && new_filename.rfind("pd-cache-", 0) == 0) {
             throw std::invalid_argument("physical routes do not support P/D Cache commands");
           }
@@ -595,11 +610,17 @@ int main(int argc, char* argv[]) {
             systems[npu_id]->workload->is_sleep = true;
           }
           else if (new_filename.rfind("template-v2", 0) == 0) {
+            if (joint) joint->check_workload(new_filename, {systems[npu_id]->workload});
             systems[npu_id]->workload
                 ->add_workload(new_filename, managed_systems[idx]);
           }
           else if (!preparation_executor.submit_command(new_filename) &&
                    !submit_pd_kv(new_filename)) {
+            if (joint) {
+                std::vector<Workload*> targets{systems[npu_id]->workload};
+                for (auto* system : managed_systems[idx]) targets.push_back(system->workload);
+                joint->check_workload(new_filename, targets);
+            }
             // Add new workload to the systems handled by this npu
             systems[npu_id]->workload
                 ->add_workload(new_filename, managed_systems[idx]);

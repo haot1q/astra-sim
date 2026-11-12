@@ -51,8 +51,20 @@ int main(int argc, char** argv) {
             client.close();
         } else {
             auto client = std::make_shared<Client>(path);
-            auto exchange = [client] { client->exchange("open"); };
-            rejects(exchange);
+            const bool host_hup = scenario.rfind("host-hup", 0) == 0;
+            if (scenario == "host-hup-ready") client->exchange("open");
+            auto exchange = [client, scenario] {
+                client->exchange(scenario == "host-hup-ready" ? "activate" : "open");
+            };
+            if (host_hup) {
+                bool cancelled = false;
+                try { exchange(); }
+                catch (const std::runtime_error& error) {
+                    cancelled = std::string(error.what()) == "activation host input closed";
+                }
+                require(cancelled, "held RPC did not observe actual host EOF");
+                rejects([&] { client->exchange("abort"); });
+            } else rejects(exchange);
             client->stop_owned();
             client->stop_owned();
             require(client.use_count() == 2 && childless(), "explicit stop relied on client destruction");

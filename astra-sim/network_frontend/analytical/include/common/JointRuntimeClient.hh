@@ -22,6 +22,7 @@ class JointRuntimeClient {
     void close();
     void stop_owned();
     const Json& config() const noexcept { return config_; }
+    static std::string original(const Json& ref, uint64_t cap, bool retain = false);
     static uint64_t decimal(const Json& value);
   private:
     Json config_;
