@@ -78,6 +78,7 @@ class JointAccessIndex {
     const JointNodeAccess* lookup(const ChakraProtoMsg::Node& node,
                                  uint32_t rank, uint32_t iteration) const;
     std::size_t binding_count() const { return nodes_.size(); }
+    std::string kind() const { return document_.at("kind").get<std::string>(); }
     void verify_file_identity(const std::string& path) const;
 
   private:

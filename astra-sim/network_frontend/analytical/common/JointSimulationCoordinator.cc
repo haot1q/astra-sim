@@ -43,6 +43,11 @@ JointSimulationCoordinator::JointSimulationCoordinator(
     if (limit("pending_nodes") > 256 || limit("callbacks") > 65536 || limit("supply_frames") > 64)
         throw std::invalid_argument("joint runtime host admission limit");
     awaiting_ = config_.contains("activation");
+    if (config_.contains("successor")) {
+        AstraSim::ServiceBindingJson::fields(config_.at("successor"), {"schema", "manifest_root"});
+        if (!awaiting_ || config_["successor"]["schema"] != "simulator-successive-views-v1")
+            throw std::invalid_argument("successor requires first activation and explicit capability");
+    }
     if (awaiting_) {
         AstraSim::ServiceBindingJson::fields(config_.at("activation"), {"schema", "manifest_path"});
         if (config_.contains("source") || config_["activation"]["schema"] != "simulator-first-activation-v1")
@@ -115,27 +120,16 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::start_service(
     });
     while (ready.is_null()) advance();
     awaiting_ = false;
+    view_identity_ = {{"session_id", config_.at("session_id")}, {"manifest_sha256", ref.at("sha256")},
+        {"view_sequence", "0"}, {"execution_iteration", facts.at("execution_iteration")}};
     idle_events_ = 0;
     return ready;
-}
-
-void JointSimulationCoordinator::check_workload(const std::string& prefix,
-        const std::vector<AstraSim::Workload*>& targets) {
-    if (awaiting_ || activation_.is_null()) return;
-    if (prefix != activation_.at("workload_prefix")) throw std::invalid_argument("activated workload prefix changed");
-    for (const auto* target : targets) {
-        const auto rank = static_cast<uint32_t>(target->sys->id);
-        if (!loaded_ranks_.insert(rank).second) throw std::invalid_argument("later business view is unsupported");
-        const auto& graph = activation_.at("graphs").at(rank);
-        if (JointRuntimeClient::decimal(graph.at("rank")) != rank) throw std::invalid_argument("graph rank differs");
-        for (const auto kind : {"et", "companion"}) JointRuntimeClient::original(graph.at(kind), 256U << 20);
-    }
 }
 
 JointSimulationCoordinator::Service::Admission JointSimulationCoordinator::try_submit(const Service::NodeRequest& r) {
     rethrow_failure();
     const Service::NodeKey key{r.identity.rank, r.identity.iteration, r.identity.node};
-    if (awaiting_ || stopped_ || draining_ || !r.access || r.identity.run != config_.at("run_id") ||
+    if (awaiting_ || handoff_ || stopped_ || draining_ || !r.access || r.identity.run != config_.at("run_id") ||
         r.identity.session != config_.at("session_id") || pending_.count(key))
         throw std::invalid_argument("invalid or repeated original node promise");
     if (pending_.size() >= limit("pending_nodes") ||
@@ -246,7 +240,7 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::call(const std::str
 void JointSimulationCoordinator::safe_point() {
     rethrow_failure();
     if (stopped_) throw std::runtime_error("joint runtime has stopped");
-    if (awaiting_ || !status_.at("ready").get<bool>() || draining_) return;
+    if (awaiting_ || handoff_ || !status_.at("ready").get<bool>() || draining_) return;
     Json nodes = Json::array();
     for (const auto& [key, r] : pending_) {
         if (sent_.count(key)) continue;
