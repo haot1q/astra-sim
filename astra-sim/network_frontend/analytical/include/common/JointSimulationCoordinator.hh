@@ -27,6 +27,7 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
               const std::vector<AstraSim::Workload*>& workloads);
     Service::Admission try_submit(const Service::NodeRequest& request) override;
     Json activate(const Json& manifest);
+    Json successor(const Json& manifest);
     void check_workload(const std::string& prefix, const std::vector<AstraSim::Workload*>& targets);
     void advance();
     void safe_point();
@@ -43,13 +44,18 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
   private:
     friend struct JointCoordinatorTestAccess;
     Json start_service(const Json& ref, const Json& facts, uint64_t epoch);
+    void require_finished_cohort(uint64_t iteration) const;
+    Json inspect_control(const std::string& prefix, uint32_t iteration) const;
+    void validate_business_graphs(const Json& manifest, uint32_t iteration) const;
+    void check_successor_facts(const Json& manifest, const Json& ref, uint64_t cut) const;
     struct Callback { JointSimulationCoordinator* owner; uint64_t id; std::function<void()> function; };
     std::shared_ptr<NetworkAnalytical::EventQueue> queue_;
     std::shared_ptr<Service> service_;
-    Json config_, status_, context_, activation_;
+    Json config_, status_, context_, activation_, view_identity_, control_;
+    std::optional<uint32_t> retired_business_;
     std::vector<AstraSim::Workload*> workloads_;
     std::set<uint32_t> loaded_ranks_;
-    bool awaiting_ = false;
+    bool awaiting_ = false, handoff_ = false;
     Exchange exchange_;
     ReceiveObserver receive_observer_;
     std::map<Service::NodeKey, Service::NodeRequest> pending_;

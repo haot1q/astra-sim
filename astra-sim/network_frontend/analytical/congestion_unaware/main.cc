@@ -259,11 +259,13 @@ int main(int argc, char* argv[]) {
         std::string line;
         if (!std::getline(std::cin, line)) throw std::runtime_error("workload input closed");
         const std::string prefix = "joint-activate-v1 ";
-        if (line.rfind(prefix, 0) == 0) {
+        const std::string next_prefix = "joint-successor-v1 ";
+        const bool successor = line.rfind(next_prefix, 0) == 0;
+        if (line.rfind(prefix, 0) == 0 || successor) {
             if (!joint || line.size() > (1U << 20)) throw std::invalid_argument("invalid activation command");
-            const auto ref = AstraSim::ServiceBindingJson::parse(line.substr(prefix.size()));
-            const auto ready = joint->activate(ref);
-            std::cout << "JOINT_ACTIVATION_READY_V1 " << ready.dump() << std::endl;
+            const auto ref = AstraSim::ServiceBindingJson::parse(line.substr(successor ? next_prefix.size() : prefix.size()));
+            const auto ready = successor ? joint->successor(ref) : joint->activate(ref);
+            std::cout << (successor ? "JOINT_SUCCESSOR_READY_V1 " : "JOINT_ACTIVATION_READY_V1 ") << ready.dump() << std::endl;
             // No clock advance between the real marker and its workload consumption.
             if (!std::getline(std::cin, line)) throw std::runtime_error("activated workload input closed");
             joint->check_workload(line, {});

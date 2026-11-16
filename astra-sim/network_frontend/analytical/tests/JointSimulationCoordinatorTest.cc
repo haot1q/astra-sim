@@ -12,6 +12,7 @@
 
 using Coordinator = AstraSimAnalytical::JointSimulationCoordinator;
 using Json = Coordinator::Json;
+void joint_successor_contract(const std::filesystem::path&, const std::string&);
 namespace AstraSimAnalytical {
 struct JointCoordinatorTestAccess {
     static Json start(const std::shared_ptr<JointSimulationCoordinator>& owner, const Json& ref,
@@ -215,7 +216,7 @@ void bound_activation(const std::filesystem::path& root, const std::string& scen
             rejects([&] { owner->check_workload(prefix, {&fixture.work(0)}); }, "original byte limit");
         } else {
             owner->check_workload(prefix, {&fixture.work(0)});
-            rejects([&] { owner->check_workload(prefix, {&fixture.work(0)}); }, "later business view");
+            rejects([&] { owner->check_workload(prefix, {&fixture.work(0)}); }, "repeated cohort rank");
             owner->check_workload(prefix, {&fixture.work(1)});
         }
         rejects([&] { owner->activate(ref); }, "activation requires");
@@ -448,6 +449,10 @@ int main(int argc, char** argv) {
     if (mode == "unit" && std::string(argv[2]) == "activation") activation_contract();
     else if (mode == "unit") queue_contract(argv[2]);
     else if (mode == "component") real_component(argv[2]);
+    else if (mode == "successor-bound" && argc == 4) {
+        AstraSim::LoggerFactory::init("empty");
+        joint_successor_contract(argv[2], argv[3]);
+    }
     else if (mode == "activation-bound" && argc == 4) {
         AstraSim::LoggerFactory::init("empty");
         bound_activation(argv[2], argv[3]);
