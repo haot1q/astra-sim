@@ -23,6 +23,8 @@ struct Run {
     Json status, input;
     std::shared_ptr<Coordinator> owner;
     unsigned activations = 0, successors = 0;
+    Json progress = Json::array();
+    AstraSimAnalytical::JointProgress::Time host_time{};
     std::string scenario;
     explicit Run(const std::filesystem::path& root, std::string test)
         : fixture(root, {256, 1048576, 4096}, false), scenario(std::move(test)) {
@@ -40,12 +42,18 @@ struct Run {
         owner = std::make_shared<Coordinator>(fixture.events, config,
             [this](const auto& cmd, const auto& body) { return exchange(cmd, body); });
         owner->bind(fixture.context, {&fixture.work(0), &fixture.work(1)});
+        if (scenario == "progress") owner->observe_progress(4, [this](const auto& line) {
+            progress.push_back(AstraSim::ServiceBindingJson::parse(line.substr(18)));
+            std::cout << line << std::endl;
+        }, [this] { return host_time; });
     }
     Json exchange(const std::string& command, const Json& body) {
         status["completions"] = Json::array(); status["accepted_prefix"] = "0";
         if (command == "activate") {
             ++activations; status["ready"] = true;
             status["business_not_before_fs"] = body.at("epoch_fs");
+            status["view_identity"] = {{"session_id", "successor-test"},
+                {"manifest_sha256", body["manifest"]["sha256"]}, {"view_sequence", "0"}, {"execution_iteration", "2"}};
         } else if (command == "admit_nodes") {
             for (const auto& row : body.at("nodes")) {
                 status["completions"].push_back({{"rank", row["rank"]}, {"iteration", row["iteration"]},
@@ -66,6 +74,8 @@ struct Run {
             if (scenario == "stale-ready") status["view_identity"]["view_sequence"] = "0";
             status["business_not_before_fs"] = body.at("cut_fs");
         }
+        const auto total = std::stoull(status["completed_nodes"].get<std::string>());
+        status["bridge"] = {{"issued", total}, {"completed", total}, {"failed", false}};
         return status;
     }
     Json finish() {
@@ -108,7 +118,9 @@ void joint_successor_contract(const std::filesystem::path& root, const std::stri
         {"control", {{"kind", "forward"}, {"iteration", "1"}, {"acks", forward}}}});
     first["first_business"] = facts;
     const auto initial_ref = save(root/"activation.json", first);
-    run.owner->activate(initial_ref);
+    const auto first_ready = run.owner->activate(initial_ref);
+    if (scenario == "progress") std::cout << "JOINT_ACTIVATION_READY_V1 " << first_ready.dump() << std::endl;
+    require(run.progress.empty(), "activation emitted progress before business");
     run.load(first);
     const auto model = run.finish();
     const auto retirement = run.fixture.events->get_current_time();
@@ -163,9 +175,19 @@ void joint_successor_contract(const std::filesystem::path& root, const std::stri
                 "invalid successor installed a later Workload");
     } else {
         const auto ready = run.owner->successor(ref);
+        if (scenario == "progress") std::cout << "JOINT_SUCCESSOR_READY_V1 " << ready.dump() << std::endl;
         require(ready.at("view_sequence") == "1" && run.activations == 1 && run.successors == 1,
                 "successor restarted the original session");
+        if (scenario == "progress") {
+            require(!run.progress.empty() && run.progress.back().at("view_sequence") == "0" &&
+                run.progress.back().at("completed_nodes") == "4",
+                "handoff failed to flush genuine old-view completion");
+            run.host_time += std::chrono::seconds(1);
+        }
         run.load(next); run.finish();
+        if (scenario == "progress") require(run.progress.back().at("view_sequence") == "1" &&
+            std::stoull(run.progress.back().at("completed_nodes").get<std::string>()) > 4,
+            "successor did not report strictly newer actual completions");
         for (unsigned rank = 0; rank < 2; ++rank)
             require(run.fixture.work(rank).iteration == 4 && run.fixture.work(rank).rank_completion_count == 5,
                     "successor did not finish through original Workload ACKs");

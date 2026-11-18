@@ -2,6 +2,7 @@
 #define ASTRA_ANALYTICAL_JOINT_SIMULATION_COORDINATOR_HH
 
 #include "common/JointRuntimeClient.hh"
+#include "common/JointProgress.hh"
 #include "astra-sim/system/memory/ExternalMemoryService.hh"
 #include <astra-network-analytical/common/EventQueue.h>
 #include <functional>
@@ -34,6 +35,8 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     void deadline(uint32_t endpoint, uint64_t when_ns, uint64_t generation);
     void enqueue_receive(uint64_t completed_fs, std::function<void(Service::ReceiveEdge)> callback);
     void observe_receives(ReceiveObserver observer);
+    void observe_progress(double timeout_seconds, JointProgress::Sink sink,
+                          JointProgress::Clock clock = std::chrono::steady_clock::now);
     void finish();
     void abort();
     void rethrow_failure() const;
@@ -58,6 +61,7 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     bool awaiting_ = false, handoff_ = false;
     Exchange exchange_;
     ReceiveObserver receive_observer_;
+    std::unique_ptr<JointProgress> progress_observer_;
     std::map<Service::NodeKey, Service::NodeRequest> pending_;
     std::set<Service::NodeKey> sent_, receiving_;
     std::set<Service::AdmissionKey> rejected_;

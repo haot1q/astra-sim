@@ -189,6 +189,7 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::successor(const Jso
         {"view_sequence", facts.at("view_sequence")}, {"execution_iteration", facts.at("execution_iteration")}};
     const auto admitted = status_.at("admitted_nodes"), completed = status_.at("completed_nodes");
     if (number(admitted) != number(completed)) throw std::invalid_argument("successor has unfinished cumulative nodes");
+    if (progress_observer_) progress_observer_->observe(config_.at("run_id"), view_identity_, status_, true);
     handoff_ = true;
     const auto initial = call("successor", {{"manifest", ref}, {"cut_fs", std::to_string(cut)}});
     for (const auto key : {"run_id", "source_provenance_digest", "source_selection_sha256", "ranks"})
