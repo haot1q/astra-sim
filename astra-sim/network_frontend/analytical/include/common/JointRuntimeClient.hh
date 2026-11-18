@@ -28,6 +28,7 @@ class JointRuntimeClient {
     Json config_;
     pid_t child_ = -1;
     int input_ = -1, output_ = -1, old_subreaper_ = 0;
+    int stderr_input_ = -1, stderr_file_ = -1;
     uint64_t sequence_ = 0, calls_ = 0;
     size_t frame_limit_ = 0;
     int timeout_ms_ = 0;
@@ -36,10 +37,11 @@ class JointRuntimeClient {
     std::ofstream transcript_;
     uint64_t transcript_bytes_ = 0;
     uint64_t log_limit_ = 128U << 20;
-    std::string stderr_path_;
+    uint64_t worker_file_limit_ = 0, stderr_bytes_ = 0;
     static bool active_;
     static std::vector<pid_t> children();
     void start(const std::string& path);
+    void collect_stderr();
     std::string transact(const std::string& frame);
     void cleanup();
 };

@@ -107,6 +107,21 @@ JointRuntimeClient::JointRuntimeClient(const std::string& path) {
     timeout_ms_ = static_cast<int>(timeout);
     log_limit_ = decimal(config_.at("limits").value("log_bytes", Json("134217728")));
     if (!log_limit_ || log_limit_ > (128U << 20)) throw std::invalid_argument("invalid runtime log budget");
+    worker_file_limit_ = log_limit_;
+    if (config_.at("limits").contains("native_log_bytes")) {
+        const auto native = decimal(config_.at("limits").at("native_log_bytes"));
+        // This is an OS file bound, not the Source/profile capacity contract.
+        if (!native || native >= RLIM_INFINITY ||
+            native > std::numeric_limits<rlim_t>::max() ||
+            native > static_cast<uint64_t>(std::numeric_limits<off_t>::max()))
+            throw std::invalid_argument("invalid native file budget");
+        worker_file_limit_ = std::max(worker_file_limit_, native);
+    }
+    rlimit inherited{};
+    if (getrlimit(RLIMIT_FSIZE, &inherited) != 0)
+        throw std::runtime_error("cannot read worker file limit");
+    if (inherited.rlim_max != RLIM_INFINITY && worker_file_limit_ > inherited.rlim_max)
+        throw std::invalid_argument("worker file budget exceeds inherited hard limit");
     if (prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper_) != 0)
         throw std::runtime_error("cannot read subreaper state");
     if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)
@@ -134,17 +149,23 @@ void JointRuntimeClient::start(const std::string& path) {
         throw std::invalid_argument("runtime output must be fresh");
     transcript_.open(output / "runtime.jsonl");
     if (!transcript_) throw std::runtime_error("cannot create runtime transcript");
-    int to_child[2], from_child[2];
+    int to_child[2], from_child[2], from_stderr[2];
     if (pipe2(to_child, O_CLOEXEC) != 0) throw std::runtime_error("runtime input pipe failed");
     if (pipe2(from_child, O_CLOEXEC) != 0) {
         ::close(to_child[0]); ::close(to_child[1]);
         throw std::runtime_error("runtime output pipe failed");
     }
-    stderr_path_ = (output / "facade.stderr").string();
-    const int error = ::open(stderr_path_.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (error < 0) {
+    if (pipe2(from_stderr, O_CLOEXEC) != 0) {
         ::close(to_child[0]); ::close(to_child[1]);
         ::close(from_child[0]); ::close(from_child[1]);
+        throw std::runtime_error("runtime stderr pipe failed");
+    }
+    stderr_file_ = ::open((output / "facade.stderr").c_str(),
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (stderr_file_ < 0) {
+        ::close(to_child[0]); ::close(to_child[1]);
+        ::close(from_child[0]); ::close(from_child[1]);
+        ::close(from_stderr[0]); ::close(from_stderr[1]);
         throw std::runtime_error("cannot create runtime stderr");
     }
     std::vector<char*> argv;
@@ -152,18 +173,48 @@ void JointRuntimeClient::start(const std::string& path) {
     argv.push_back(nullptr);
     child_ = fork();
     if (child_ == 0) {
-        const rlimit file_limit{log_limit_, log_limit_};
+        const auto bound = static_cast<rlim_t>(worker_file_limit_);
+        const rlimit file_limit{bound, bound};
         if (setrlimit(RLIMIT_FSIZE, &file_limit) != 0) _exit(126);
-        if (setsid() < 0 || dup2(to_child[0], 0) < 0 || dup2(from_child[1], 1) < 0 || dup2(error, 2) < 0)
+        if (setsid() < 0 || dup2(to_child[0], 0) < 0 || dup2(from_child[1], 1) < 0 ||
+            dup2(from_stderr[1], 2) < 0)
             _exit(126);
         execv(argv[0], argv.data());
         _exit(127);
     }
-    ::close(to_child[0]); ::close(from_child[1]); ::close(error);
-    input_ = to_child[1]; output_ = from_child[0];
+    ::close(to_child[0]); ::close(from_child[1]); ::close(from_stderr[1]);
+    input_ = to_child[1]; output_ = from_child[0]; stderr_input_ = from_stderr[0];
     if (child_ < 0) throw std::runtime_error("runtime fork failed");
-    if (fcntl(input_, F_SETFL, O_NONBLOCK) < 0 || fcntl(output_, F_SETFL, O_NONBLOCK) < 0)
+    if (fcntl(input_, F_SETFL, O_NONBLOCK) < 0 || fcntl(output_, F_SETFL, O_NONBLOCK) < 0 ||
+        fcntl(stderr_input_, F_SETFL, O_NONBLOCK) < 0)
         throw std::runtime_error("cannot make runtime pipes nonblocking");
+}
+
+void JointRuntimeClient::collect_stderr() {
+    if (stderr_bytes_ >= log_limit_)
+        throw std::runtime_error("runtime stderr budget exhausted");
+    // Limit work per call so a busy diagnostic stream cannot starve IPC deadlines.
+    for (unsigned chunk = 0; stderr_input_ >= 0 && chunk < 32; ++chunk) {
+        char buffer[4096];
+        const auto count = read(stderr_input_, buffer, sizeof(buffer));
+        if (!count) { ::close(stderr_input_); stderr_input_ = -1; return; }
+        if (count < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EINTR) continue;
+            throw std::runtime_error("runtime stderr read failed");
+        }
+        const auto retained = std::min<uint64_t>(count, log_limit_ - stderr_bytes_);
+        uint64_t offset = 0;
+        while (offset < retained) {
+            const auto written = write(stderr_file_, buffer + offset, retained - offset);
+            if (written > 0) offset += written;
+            else if (written < 0 && errno == EINTR) continue;
+            else throw std::runtime_error("runtime stderr write failed");
+        }
+        stderr_bytes_ += retained;
+        if (stderr_bytes_ >= log_limit_)
+            throw std::runtime_error("runtime stderr budget exhausted");
+    }
 }
 
 std::string JointRuntimeClient::transact(const std::string& frame) {
@@ -180,17 +231,19 @@ std::string JointRuntimeClient::transact(const std::string& frame) {
     while (sent < frame.size() || pending_.find('\n') == std::string::npos) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
         if (left <= 0) throw std::runtime_error("runtime host IPC timeout");
-        if (std::filesystem::file_size(stderr_path_) >= log_limit_)
-            throw std::runtime_error("runtime stderr budget exhausted");
+        collect_stderr();
         // Cancellation observes HUP only: the original workload reader owns stdin bytes.
-        pollfd fds[3]{{output_, POLLIN, 0}, {sent < frame.size() ? input_ : -1, POLLOUT, 0},
-                      {config_.contains("activation") ? STDIN_FILENO : -1, 0, 0}};
-        if (poll(fds, 3, static_cast<int>(std::min<int64_t>(left, 100))) < 0) {
+        pollfd fds[4]{{output_, POLLIN, 0}, {sent < frame.size() ? input_ : -1, POLLOUT, 0},
+                      {config_.contains("activation") ? STDIN_FILENO : -1, 0, 0},
+                      {stderr_input_, POLLIN, 0}};
+        if (poll(fds, 4, static_cast<int>(std::min<int64_t>(left, 100))) < 0) {
             if (errno == EINTR) continue;
             throw std::runtime_error("runtime poll failed");
         }
         if (fds[2].revents & (POLLHUP | POLLERR | POLLNVAL))
             throw std::runtime_error("activation host input closed");
+        if (fds[3].revents & POLLNVAL) throw std::runtime_error("runtime stderr pipe closed");
+        if (fds[3].revents & (POLLIN | POLLHUP | POLLERR)) collect_stderr();
         if (fds[1].revents & POLLOUT) {
             const auto count = write(input_, frame.data() + sent, frame.size() - sent);
             if (count > 0) sent += count;
@@ -246,6 +299,8 @@ void JointRuntimeClient::cleanup() {
     if (!owned_) return;
     if (input_ >= 0) { ::close(input_); input_ = -1; }
     if (output_ >= 0) { ::close(output_); output_ = -1; }
+    if (stderr_input_ >= 0) { ::close(stderr_input_); stderr_input_ = -1; }
+    if (stderr_file_ >= 0) { ::close(stderr_file_); stderr_file_ = -1; }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     for (size_t round = 0; round < 300; ++round) {
         const auto current = children();
@@ -275,8 +330,7 @@ void JointRuntimeClient::close() {
     int status = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms_);
     while (true) {
-        if (std::filesystem::file_size(stderr_path_) >= log_limit_)
-            throw std::runtime_error("runtime stderr budget exhausted at exit");
+        collect_stderr();
         const auto waited = waitpid(child_, &status, WNOHANG);
         if (waited == child_) break;
         if (waited < 0 && errno != EINTR) throw std::runtime_error("runtime exit ownership lost");
@@ -285,6 +339,14 @@ void JointRuntimeClient::close() {
     }
     child_ = -1;
     const bool clean = WIFEXITED(status) && WEXITSTATUS(status) == 0 && children().empty();
+    // A close reply and child exit do not imply that the diagnostic pipe is empty.
+    while (clean && stderr_input_ >= 0) {
+        collect_stderr();
+        if (stderr_input_ < 0) break;
+        if (std::chrono::steady_clock::now() >= deadline)
+            throw std::runtime_error("runtime stderr exit timeout");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     cleanup();
     if (!clean) throw std::runtime_error("runtime nonzero exit or leaked child");
 }
