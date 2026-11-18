@@ -14,6 +14,8 @@
 using Coordinator = AstraSimAnalytical::JointSimulationCoordinator;
 using Json = Coordinator::Json;
 void joint_successor_contract(const std::filesystem::path&, const std::string&);
+void joint_cx_advance_contract(const std::string&);
+void joint_cx_advance_workload(const std::filesystem::path&);
 namespace AstraSimAnalytical {
 struct JointCoordinatorTestAccess {
     static Json start(const std::shared_ptr<JointSimulationCoordinator>& owner, const Json& ref,
@@ -505,7 +507,9 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    if (mode == "unit" && std::string(argv[2]) == "progress") progress_contract();
+    if (mode == "before-workload") joint_cx_advance_workload(argv[2]);
+    else if (mode == "before") joint_cx_advance_contract(argv[2]);
+    else if (mode == "unit" && std::string(argv[2]) == "progress") progress_contract();
     else if (mode == "unit" && std::string(argv[2]) == "activation") activation_contract();
     else if (mode == "unit") queue_contract(argv[2]);
     else if (mode == "component") real_component(argv[2]);

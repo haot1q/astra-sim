@@ -72,7 +72,10 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     uint64_t progress_ = 0;
     std::string tie_, failure_;
     bool stopped_ = false, draining_ = false, hold_set_ = false, hold_released_ = false;
-    Json call(const std::string& command, const Json& body = Json::object());
+    using Candidates = std::map<std::string, std::pair<uint64_t, Json>>;
+    bool advance_cx(const Candidates& candidates, const std::string& chosen, uint64_t first);
+    Json call(const std::string& command, const Json& body = Json::object(),
+              const std::function<void(const Json&)>& before_consume = {});
     void consume(Json reply);
     void schedule(uint64_t when_ns, std::function<void()> callback);
     static void dispatch(void* argument) noexcept;

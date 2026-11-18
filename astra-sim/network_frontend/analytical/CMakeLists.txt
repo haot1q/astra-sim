@@ -109,7 +109,7 @@ if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
                 ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
         endforeach()
-        target_sources(AstraSim_JointSimulationCoordinator_Test PRIVATE tests/JointSuccessorTest.cc)
+        target_sources(AstraSim_JointSimulationCoordinator_Test PRIVATE tests/JointSuccessorTest.cc tests/JointCxAdvanceTest.cc)
         # Python generates the original Source -> converter -> finalized ET fixture.
         add_executable(AstraSim_ExternalMemoryService_Test tests/ExternalMemoryServiceTest.cc
             congestion_unaware/CongestionUnawareNetworkApi.cc ${srcs_common})
