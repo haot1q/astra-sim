@@ -34,6 +34,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--joint-progress-capability") {
+        std::cout << "joint-progress-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--joint-runtime-capability") {
         std::cout << "joint-runtime-v1" << std::endl;
         return 0;
@@ -148,6 +152,9 @@ int main(int argc, char* argv[]) {
     const auto joint_path = cmd_line_parser.get<std::string>("joint-source-context");
     auto joint_context = joint_path.empty() ? nullptr : JointSourceContext::load(joint_path);
     const auto runtime_path = cmd_line_parser.get<std::string>("joint-runtime-config");
+    const auto progress_timeout = cmd_line_parser.get<double>("joint-progress-timeout-seconds");
+    if (progress_timeout != 0 && runtime_path.empty())
+        throw std::invalid_argument("joint progress requires the joint runtime");
     if (!runtime_path.empty() && (!joint_context ||
         joint_context->identity().at("mode") != "external_source_service")) {
         throw std::invalid_argument("joint runtime requires external_source_service context");
@@ -254,6 +261,10 @@ int main(int argc, char* argv[]) {
         std::vector<Workload*> workloads;
         for (auto* system : systems) workloads.push_back(system->workload);
         joint->bind(joint_context, workloads);
+        if (progress_timeout != 0) joint->observe_progress(progress_timeout, [](const auto& line) {
+            std::cout << line << std::endl;
+            if (!std::cout) throw std::runtime_error("joint progress output failed");
+        });
     }
     const auto read_workload = [&]() {
         std::string line;

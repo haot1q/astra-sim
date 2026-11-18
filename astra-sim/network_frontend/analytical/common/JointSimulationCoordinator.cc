@@ -190,6 +190,14 @@ void JointSimulationCoordinator::observe_receives(ReceiveObserver observer) {
     receive_observer_ = std::move(observer);
 }
 
+void JointSimulationCoordinator::observe_progress(double timeout_seconds, JointProgress::Sink sink,
+                                                  JointProgress::Clock clock) {
+    if (progress_observer_ || !pending_.empty() ||
+        JointRuntimeClient::decimal(status_.at("admitted_nodes")))
+        throw std::invalid_argument("progress observer must bind once before business");
+    progress_observer_ = std::make_unique<JointProgress>(timeout_seconds, std::move(sink), std::move(clock));
+}
+
 void JointSimulationCoordinator::consume(Json reply) {
     if (!reply.at("ready").is_boolean() || !reply.at("completions").is_array())
         throw std::invalid_argument("malformed runtime state");
@@ -220,6 +228,8 @@ void JointSimulationCoordinator::consume(Json reply) {
         });
     }
     status_ = std::move(reply);
+    if (progress_observer_ && !awaiting_ && !handoff_ && !view_identity_.is_null())
+        progress_observer_->observe(config_.at("run_id"), view_identity_, status_);
 }
 
 JointSimulationCoordinator::Json JointSimulationCoordinator::call(const std::string& command, const Json& body) {

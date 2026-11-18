@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <limits>
 #include <openssl/sha.h>
 #include <sstream>
 #include <set>
@@ -90,6 +91,61 @@ Json empty_status() {
         {"accepted_prefix", "0"}, {"native_state", "NEW"}, {"business_not_before_fs", "0"}, {"supply_idle", Json::object()}};
 }
 
+void progress_contract() {
+    using Progress = AstraSimAnalytical::JointProgress;
+    auto now = Progress::Time{};
+    std::vector<std::string> lines;
+    const auto sink = [&](const auto& line) { lines.push_back(line); };
+    Progress progress(4.0, sink, [&] { return now; });
+    Json identity{{"session_id", "s"}, {"manifest_sha256", std::string(64, 'a')},
+                  {"execution_iteration", "2"}, {"view_sequence", "0"}};
+    auto status = empty_status();
+    status["view_identity"] = identity;
+    status["bridge"] = {{"completed", 0}, {"issued", 3}, {"failed", false}};
+    progress.observe("r", identity, status);
+    require(lines.empty(), "issued alone created progress");
+    status["bridge"]["completed"] = 1;
+    progress.observe("r", identity, status);
+    require(lines.size() == 1, "first genuine completion was not reported");
+    status["bridge"]["completed"] = 2;
+    progress.observe("r", identity, status);
+    require(lines.size() == 1, "growth did not coalesce");
+    now += std::chrono::seconds(1);
+    progress.observe("r", identity, status);
+    require(lines.size() == 2, "unchanged later reply lost pending completion");
+    progress.observe("r", identity, status, true);
+    require(lines.size() == 2, "duplicate or forced flush fabricated progress");
+    auto bad = status; bad["bridge"]["completed"] = 0;
+    rejects([&] { progress.observe("r", identity, bad); }, "decreased");
+    bad = status; bad["bridge"]["completed"] = 4;
+    rejects([&] { progress.observe("r", identity, bad); }, "exceeds");
+    bad = status; bad["bridge"]["completed"] = -1;
+    rejects([&] { progress.observe("r", identity, bad); }, "integer");
+    rejects([&] { progress.observe("other", identity, status); }, "run identity");
+    bad = status; bad["view_identity"]["session_id"] = "other";
+    rejects([&] { progress.observe("r", identity, bad); }, "identity");
+    status["bridge"]["completed"] = 3;
+    progress.observe("r", identity, status, true);
+    require(lines.size() == 3, "handoff lost pending old-view completion");
+    identity["view_sequence"] = "1"; identity["execution_iteration"] = "4";
+    identity["manifest_sha256"] = std::string(64, 'b'); status["view_identity"] = identity;
+    progress.observe("r", identity, status);
+    require(lines.size() == 3, "view switch fabricated progress");
+    Progress short_wait(.04, sink, [&] { return now; });
+    short_wait.observe("r", identity, status);
+    status["bridge"]["issued"] = status["bridge"]["completed"] = 4;
+    now += std::chrono::milliseconds(10);
+    short_wait.observe("r", identity, status);
+    require(lines.size() == 5, "short watchdog interval was rounded away");
+    Progress long_identity(1, sink);
+    long_identity.observe(std::string(5000, 'r'), identity, status);
+    require(lines.back().size() > 5000, "legal long identity was truncated");
+    Progress oversized(1, sink);
+    rejects([&] { oversized.observe(std::string(65536, 'r'), identity, status); }, "line limit");
+    for (const auto value : {0.0, -1.0, std::numeric_limits<double>::infinity()})
+        rejects([&] { Progress invalid(value, sink); }, "finite positive");
+}
+
 void activation_contract() {
     auto queue = std::make_shared<NetworkAnalytical::EventQueue>();
     auto config = configuration();
@@ -110,6 +166,8 @@ void activation_contract() {
         }
         return status;
     });
+    unsigned notifications = 0;
+    owner->observe_progress(4, [&](const auto&) { ++notifications; });
     require(calls.empty(), "awaiting constructor opened a lower service");
     rejects([&] { owner->try_submit(Coordinator::Service::NodeRequest{}); }, "invalid or repeated");
     rejects([&] { owner->activate(Json::object()); }, "activation requires");
@@ -121,6 +179,7 @@ void activation_contract() {
     require(ready.at("anchor_ns") == "107" && queue->get_current_time() == 107 &&
             ready.at("business_not_before_fs") == "107000000" && calls == std::vector<std::string>{"activate", "step_at"},
             "activation marker did not execute on the original receive queue");
+    require(notifications == 0, "activation observer fabricated progress or model calls");
     rejects([&] { owner->activate(Json::object()); }, "activation requires");
     owner->abort();
 }
@@ -446,7 +505,8 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    if (mode == "unit" && std::string(argv[2]) == "activation") activation_contract();
+    if (mode == "unit" && std::string(argv[2]) == "progress") progress_contract();
+    else if (mode == "unit" && std::string(argv[2]) == "activation") activation_contract();
     else if (mode == "unit") queue_contract(argv[2]);
     else if (mode == "component") real_component(argv[2]);
     else if (mode == "successor-bound" && argc == 4) {
