@@ -42,6 +42,8 @@ JointSimulationCoordinator::JointSimulationCoordinator(
                             "no_progress_events", "horizon_fs", "supply_frames"}) limit(name);
     if (limit("pending_nodes") > 256 || limit("callbacks") > 65536 || limit("supply_frames") > 64)
         throw std::invalid_argument("joint runtime host admission limit");
+    const auto mode = config_.value("cx_advance_mode", std::string("step"));
+    if (mode != "step" && mode != "safe-before-v1") throw std::invalid_argument("invalid CX advance mode");
     awaiting_ = config_.contains("activation");
     if (config_.contains("successor")) {
         AstraSim::ServiceBindingJson::fields(config_.at("successor"), {"schema", "manifest_root"});
@@ -232,9 +234,11 @@ void JointSimulationCoordinator::consume(Json reply) {
         progress_observer_->observe(config_.at("run_id"), view_identity_, status_);
 }
 
-JointSimulationCoordinator::Json JointSimulationCoordinator::call(const std::string& command, const Json& body) {
+JointSimulationCoordinator::Json JointSimulationCoordinator::call(const std::string& command, const Json& body,
+        const std::function<void(const Json&)>& before_consume) {
     try {
         auto reply = exchange_(command, body);
+        if (before_consume) before_consume(reply);
         consume(reply);
         while (status_.value("more_pending", false)) {
             if (++same_time_ > limit("same_time_events")) throw std::runtime_error("joint reply continuation budget exhausted");
@@ -296,7 +300,7 @@ void JointSimulationCoordinator::deadline(uint32_t endpoint, uint64_t when_ns, u
 
 void JointSimulationCoordinator::advance() {
     safe_point();
-    std::map<std::string, std::pair<uint64_t, Json>> candidates;
+    Candidates candidates;
     const auto next = queue_->peek_next_time();
     if (next.status == EventPeekStatus::Ready) candidates["0"] = {fs(next.time), Json()};
     else if (next.status != EventPeekStatus::Empty) throw std::runtime_error("ASTRA queue is not at a safe point");
@@ -312,21 +316,22 @@ void JointSimulationCoordinator::advance() {
         [](const auto& a, const auto& b) { return a.second.first < b.second.first; })->second.first;
     if (earliest < frontier_fs_ || earliest >= limit("horizon_fs"))
         throw std::runtime_error("joint time regression or horizon exceeded");
+    const auto previous_tie = earliest == frontier_fs_ ? tie_ : std::string();
+    auto chosen = candidates.end();
+    for (auto it = candidates.begin(); it != candidates.end(); ++it)
+        if (it->second.first == earliest && it->first > previous_tie) { chosen = it; break; }
+    if (chosen == candidates.end()) {
+        for (auto it = candidates.begin(); it != candidates.end(); ++it)
+            if (it->second.first == earliest) { chosen = it; break; }
+    }
+    if (advance_cx(candidates, chosen->first, earliest)) return;
     if (earliest != frontier_fs_) {
         if (earliest) closed_ns_ = (earliest - 1) / 1000000;
-        tie_.clear(); same_time_ = 0;
+        same_time_ = 0;
     }
     frontier_fs_ = earliest;
     if (++events_ > limit("events") || ++same_time_ > limit("same_time_events"))
         throw std::runtime_error("joint event budget exhausted");
-    auto chosen = candidates.end();
-    for (auto it = candidates.begin(); it != candidates.end(); ++it)
-        if (it->second.first == earliest && it->first > tie_) { chosen = it; break; }
-    if (chosen == candidates.end()) {
-        tie_.clear();
-        for (auto it = candidates.begin(); it != candidates.end(); ++it)
-            if (it->second.first == earliest) { chosen = it; break; }
-    }
     tie_ = chosen->first;
     if (tie_ == "0") {
         if (queue_->step_at(earliest / 1000000) != EventStepStatus::Executed)
