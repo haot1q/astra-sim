@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -15,11 +16,57 @@ template<class F> void rejects(F function) {
     try { function(); } catch (const std::exception&) { return; }
     throw std::runtime_error("expected runtime rejection");
 }
+template<class F> void rejects_with(F function, const char* expected) {
+    try { function(); }
+    catch (const std::exception& error) {
+        require(std::string(error.what()) == expected, "wrong runtime failure boundary");
+        return;
+    }
+    throw std::runtime_error("expected specific runtime rejection");
+}
 bool childless() {
     std::ifstream stream("/proc/self/task/" + std::to_string(getpid()) + "/children");
     std::string value;
     stream >> value;
     return value.empty();
+}
+bool file_budget_scenario(const std::string& path, const std::string& scenario) {
+    if (scenario == "inherited-file-limit") {
+        const rlimit bound{4096, 4096};
+        require(setrlimit(RLIMIT_FSIZE, &bound) == 0, "test cannot lower its own file limit");
+        rejects_with([&] { Client client(path); }, "worker file budget exceeds inherited hard limit");
+        return true;
+    }
+    if (scenario == "invalid-file-limit") {
+        rejects([&] { Client client(path); });
+        return true;
+    }
+    if (scenario != "file-limit" && scenario != "stderr-budget" &&
+        scenario != "stderr-close" && scenario != "close-orphan" &&
+        scenario != "transcript-budget") return false;
+    Client client(path);
+    if (scenario == "file-limit") {
+        rejects([&] { client.exchange("open"); });
+    } else if (scenario == "stderr-budget") {
+        rejects_with([&] { client.exchange("open"); }, "runtime stderr budget exhausted");
+        rejects_with([&] { client.exchange("open"); }, "runtime stderr budget exhausted");
+        rejects_with([&] { client.close(); }, "runtime stderr budget exhausted");
+    } else if (scenario == "transcript-budget") {
+        rejects_with([&] {
+            for (unsigned i = 0; i < 10; ++i) client.exchange("open");
+        }, "runtime transcript budget exhausted");
+    } else {
+        client.exchange("open");
+        rejects_with([&] { client.close(); }, scenario == "stderr-close" ?
+                     "runtime stderr budget exhausted" : "runtime nonzero exit or leaked child");
+        if (scenario == "stderr-close") {
+            rejects([&] { client.exchange("open"); });
+            rejects_with([&] { client.close(); }, "runtime stderr budget exhausted");
+        }
+    }
+    client.stop_owned();
+    client.stop_owned();
+    return true;
 }
 }
 
@@ -43,7 +90,9 @@ int main(int argc, char** argv) {
     } else {
         const int wanted = scenario == "restore-one" ? 1 : 0;
         require(prctl(PR_SET_CHILD_SUBREAPER, wanted) == 0, "test cannot set subreaper");
-        if (scenario == "normal" || scenario == "restore-one") {
+        if (file_budget_scenario(path, scenario)) {
+            require(childless(), "file budget failure leaked a child");
+        } else if (scenario == "normal" || scenario == "restore-one") {
             Client client(path);
             rejects([&] { Client second(path); });
             require(client.exchange("open").at("echo") == "open", "runtime reply not observed");
