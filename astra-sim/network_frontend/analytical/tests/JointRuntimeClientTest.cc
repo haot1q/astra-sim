@@ -37,13 +37,13 @@ bool file_budget_scenario(const std::string& path, const std::string& scenario) 
         rejects_with([&] { Client client(path); }, "worker file budget exceeds inherited hard limit");
         return true;
     }
-    if (scenario == "invalid-file-limit") {
+    if (scenario == "invalid-file-limit" || scenario == "invalid-config") {
         rejects([&] { Client client(path); });
         return true;
     }
     if (scenario != "file-limit" && scenario != "stderr-budget" &&
         scenario != "stderr-close" && scenario != "close-orphan" &&
-        scenario != "transcript-budget") return false;
+        scenario != "transcript-budget" && scenario != "transcript-close-budget") return false;
     Client client(path);
     if (scenario == "file-limit") {
         rejects([&] { client.exchange("open"); });
@@ -55,6 +55,10 @@ bool file_budget_scenario(const std::string& path, const std::string& scenario) 
         rejects_with([&] {
             for (unsigned i = 0; i < 10; ++i) client.exchange("open");
         }, "runtime transcript budget exhausted");
+        rejects_with([&] { client.exchange("open"); }, "runtime transcript budget exhausted");
+    } else if (scenario == "transcript-close-budget") {
+        client.exchange("open");
+        rejects_with([&] { client.close(); }, "runtime transcript budget exhausted");
     } else {
         client.exchange("open");
         rejects_with([&] { client.close(); }, scenario == "stderr-close" ?

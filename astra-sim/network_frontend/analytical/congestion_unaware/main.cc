@@ -34,6 +34,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--joint-transcript-capability") {
+        std::cout << "joint-runtime-transcript-budget-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--joint-cx-advance-capability") {
         std::cout << "joint-cx-advance-before-v1" << std::endl;
         return 0;
