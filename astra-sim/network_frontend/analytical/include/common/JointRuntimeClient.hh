@@ -37,6 +37,7 @@ class JointRuntimeClient {
     std::ofstream transcript_;
     uint64_t transcript_bytes_ = 0;
     uint64_t log_limit_ = 128U << 20;
+    uint64_t transcript_limit_ = 128U << 20;
     uint64_t worker_file_limit_ = 0, stderr_bytes_ = 0;
     static bool active_;
     static std::vector<pid_t> children();

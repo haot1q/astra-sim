@@ -107,6 +107,10 @@ JointRuntimeClient::JointRuntimeClient(const std::string& path) {
     timeout_ms_ = static_cast<int>(timeout);
     log_limit_ = decimal(config_.at("limits").value("log_bytes", Json("134217728")));
     if (!log_limit_ || log_limit_ > (128U << 20)) throw std::invalid_argument("invalid runtime log budget");
+    transcript_limit_ = config_.at("limits").contains("transcript_bytes") ?
+        decimal(config_.at("limits").at("transcript_bytes")) : log_limit_;
+    if (!transcript_limit_ || transcript_limit_ > (256U << 20))
+        throw std::invalid_argument("invalid runtime transcript budget");
     worker_file_limit_ = log_limit_;
     if (config_.at("limits").contains("native_log_bytes")) {
         const auto native = decimal(config_.at("limits").at("native_log_bytes"));
@@ -277,8 +281,11 @@ JointRuntimeClient::Json JointRuntimeClient::exchange(const std::string& command
     if (frame.size() > frame_limit_) throw std::runtime_error("runtime command byte limit");
     const auto reply = AstraSim::ServiceBindingJson::parse(transact(frame));
     const auto record = Json{{"command", request}, {"reply", reply}}.dump() + "\n";
+    if (transcript_bytes_ > transcript_limit_ || record.size() > transcript_limit_ - transcript_bytes_) {
+        transcript_bytes_ = transcript_limit_ + 1;  // Preserve rejection on subsequent calls.
+        throw std::runtime_error("runtime transcript budget exhausted");
+    }
     transcript_bytes_ += record.size();
-    if (transcript_bytes_ > log_limit_) throw std::runtime_error("runtime transcript budget exhausted");
     transcript_ << record << std::flush;
     if (!transcript_) throw std::runtime_error("runtime transcript write failed");
     if (reply.size() != 5 || reply.at("version") != request["version"] ||
