@@ -4,6 +4,7 @@
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include <algorithm>
 #include <limits>
+#include <iostream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -44,6 +45,13 @@ JointSimulationCoordinator::JointSimulationCoordinator(
         throw std::invalid_argument("joint runtime host admission limit");
     const auto mode = config_.value("cx_advance_mode", std::string("step"));
     if (mode != "step" && mode != "safe-before-v1") throw std::invalid_argument("invalid CX advance mode");
+    const auto mw_mode = config_.value("mw_advance_mode", std::string("step"));
+    if (mw_mode == "safe-before-v1") {
+        const auto& value = config_.at("open").at("engine_budget").at("events_per_call");
+        if (!value.is_number_unsigned() || value.get<uint64_t>() == 0)
+            throw std::invalid_argument("invalid Akita per-call event budget");
+        mw_per_call_ = value.get<uint64_t>();
+    } else if (mw_mode != "step") throw std::invalid_argument("invalid Akita advance mode");
     awaiting_ = config_.contains("activation");
     if (config_.contains("successor")) {
         AstraSim::ServiceBindingJson::fields(config_.at("successor"), {"schema", "manifest_root"});
@@ -324,6 +332,8 @@ void JointSimulationCoordinator::advance() {
         for (auto it = candidates.begin(); it != candidates.end(); ++it)
             if (it->second.first == earliest) { chosen = it; break; }
     }
+    if (mw_per_call_ && chosen->first.rfind("1/", 0) == 0 &&
+        advance_mw(candidates, chosen->first, earliest)) return;
     if (advance_cx(candidates, chosen->first, earliest)) return;
     if (earliest != frontier_fs_) {
         if (earliest) closed_ns_ = (earliest - 1) / 1000000;
@@ -372,6 +382,7 @@ void JointSimulationCoordinator::finish() {
     };
     while (!drained()) advance();
     call("close");
+    if (mw_per_call_) std::clog << "joint-mw-batch-fallbacks " << Json(mw_fallbacks_).dump() << '\n';
     stopped_ = true;
 }
 
