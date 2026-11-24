@@ -38,6 +38,10 @@ int main(int argc, char* argv[]) {
         std::cout << "joint-memory-grant-v1" << std::endl;
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--joint-optional-transcript-capability") {
+        std::cout << "joint-optional-transcript-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--joint-transcript-capability") {
         std::cout << "joint-runtime-transcript-budget-v1" << std::endl;
         return 0;

@@ -110,6 +110,8 @@ if (BUILDTARGET STREQUAL "all" OR BUILDTARGET STREQUAL "congestion_unaware")
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../../extern/helper)
         endforeach()
         target_sources(AstraSim_JointSimulationCoordinator_Test PRIVATE tests/JointSuccessorTest.cc tests/JointCxAdvanceTest.cc tests/JointMwAdvanceTest.cc tests/JointMemoryGrantTest.cc)
+        add_test(NAME joint_optional_outer_recording COMMAND python3
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/optional_transcript.py $<TARGET_FILE:AstraSim_JointRuntimeClient_Test>)
         add_test(NAME joint_memory_grant_contract COMMAND AstraSim_JointSimulationCoordinator_Test memory-grant generated)
         add_test(NAME joint_mw_advance_equivalence COMMAND AstraSim_JointSimulationCoordinator_Test mw-before generated)
         # Python generates the original Source -> converter -> finalized ET fixture.
