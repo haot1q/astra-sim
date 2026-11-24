@@ -43,6 +43,11 @@ JointSimulationCoordinator::JointSimulationCoordinator(
                             "no_progress_events", "horizon_fs", "supply_frames"}) limit(name);
     if (limit("pending_nodes") > 256 || limit("callbacks") > 65536 || limit("supply_frames") > 64)
         throw std::invalid_argument("joint runtime host admission limit");
+    const auto engine = config_.value("memory_engine", std::string("split"));
+    if (engine != "split" && engine != "in-process")
+        throw std::invalid_argument("unknown joint memory engine");
+    in_process_ = engine == "in-process";
+    phase_timing_ = config_.value("measure_view_time", false);
     const auto mode = config_.value("cx_advance_mode", std::string("step"));
     if (mode != "step" && mode != "safe-before-v1") throw std::invalid_argument("invalid CX advance mode");
     const auto mw_mode = config_.value("mw_advance_mode", std::string("step"));
@@ -130,9 +135,20 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::start_service(
     });
     while (ready.is_null()) advance();
     awaiting_ = false;
+    if (in_process_) {
+        memory_controls_fs_.emplace();
+        const auto origin = JointRuntimeClient::decimal(ready.at("business_not_before_fs"));
+        for (const auto& row : config_.value("software_controls", Json::array())) {
+            const auto offset = JointRuntimeClient::decimal(row.at("offset_fs"));
+            if (offset >= limit("horizon_fs") - origin)
+                throw std::invalid_argument("software control exceeds the global horizon");
+            memory_controls_fs_->insert(origin + offset);
+        }
+    }
     view_identity_ = {{"session_id", config_.at("session_id")}, {"manifest_sha256", ref.at("sha256")},
         {"view_sequence", "0"}, {"execution_iteration", facts.at("execution_iteration")}};
     idle_events_ = 0;
+    begin_view_timing();
     return ready;
 }
 
@@ -282,7 +298,8 @@ void JointSimulationCoordinator::safe_point() {
     const auto arrival = std::max(frontier_fs_, JointRuntimeClient::decimal(status_.at("business_not_before_fs")));
     const auto domains = status_.at("domains");
     for (const auto& domain : domains) {
-        if (status_.at("supply_idle").at(domain.at("id").get<std::string>()).get<bool>()) continue;
+        const auto id = domain.at("id").get<std::string>();
+        if (status_.at("supply_idle").at(id).get<bool>() || (in_process_ && waiting_for_supply(id))) continue;
         std::string reason;
         do {
             if (++same_time_ > limit("same_time_events")) throw std::runtime_error("joint supply exchange budget exhausted");
@@ -332,9 +349,14 @@ void JointSimulationCoordinator::advance() {
         for (auto it = candidates.begin(); it != candidates.end(); ++it)
             if (it->second.first == earliest) { chosen = it; break; }
     }
-    if (mw_per_call_ && chosen->first.rfind("1/", 0) == 0 &&
+    if (in_process_ && chosen->first != "0" && !awaiting_ && !handoff_ && !draining_ &&
+        status_.at("ready").get<bool>() && status_.at("native_state") == "READY") {
+        advance_memory(candidates, chosen->first, earliest);
+        return;
+    }
+    if (!in_process_ && mw_per_call_ && chosen->first.rfind("1/", 0) == 0 &&
         advance_mw(candidates, chosen->first, earliest)) return;
-    if (advance_cx(candidates, chosen->first, earliest)) return;
+    if (!in_process_ && advance_cx(candidates, chosen->first, earliest)) return;
     if (earliest != frontier_fs_) {
         if (earliest) closed_ns_ = (earliest - 1) / 1000000;
         same_time_ = 0;
@@ -370,6 +392,8 @@ void JointSimulationCoordinator::advance() {
 
 void JointSimulationCoordinator::finish() {
     safe_point();
+    observe_view_completion();
+    if (phase_target_) throw std::runtime_error("joint view ended before its measured scope drained");
     if (!pending_.empty() || !callbacks_.empty() || !queue_->finished())
         throw std::runtime_error("ASTRA promises or callbacks remain at joint close");
     if (service_) service_->close();

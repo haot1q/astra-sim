@@ -211,6 +211,7 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::successor(const Jso
     while (ready.is_null()) advance();
     activation_ = value; view_identity_ = identity; control_ = Json();
     loaded_ranks_.clear(); retired_business_.reset(); handoff_ = false; idle_events_ = 0;
+    begin_view_timing();
     return ready;
 }
 }

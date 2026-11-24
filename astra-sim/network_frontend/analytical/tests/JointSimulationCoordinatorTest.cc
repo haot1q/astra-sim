@@ -15,6 +15,7 @@ using Coordinator = AstraSimAnalytical::JointSimulationCoordinator;
 using Json = Coordinator::Json;
 void joint_successor_contract(const std::filesystem::path&, const std::string&);
 void joint_mw_advance_contract();
+void joint_memory_grant_contract();
 void joint_cx_advance_contract(const std::string&);
 void joint_cx_advance_workload(const std::filesystem::path&);
 namespace AstraSimAnalytical {
@@ -508,7 +509,8 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    if (mode == "mw-before") joint_mw_advance_contract();
+    if (mode == "memory-grant") joint_memory_grant_contract();
+    else if (mode == "mw-before") joint_mw_advance_contract();
     else if (mode == "before-workload") joint_cx_advance_workload(argv[2]);
     else if (mode == "before") joint_cx_advance_contract(argv[2]);
     else if (mode == "unit" && std::string(argv[2]) == "progress") progress_contract();
