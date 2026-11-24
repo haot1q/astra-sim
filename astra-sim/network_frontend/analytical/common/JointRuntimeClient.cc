@@ -23,6 +23,31 @@
 #include <unistd.h>
 
 namespace AstraSimAnalytical {
+namespace {
+bool record_outer(const JointRuntimeClient::Json& config, const std::filesystem::path& config_path) {
+    const auto recording = config.find("recording");
+    if (recording == config.end() || !recording->contains("policy_schema")) return true;
+    constexpr auto schema = "simulator-joint-recording-selection-v1";
+    if (recording->at("policy_schema") != schema)
+        throw std::invalid_argument("unsupported joint recording policy");
+
+    const auto path = config_path.parent_path() / "runtime-recording.json";
+    std::string raw;
+    const auto policy = AstraSim::JointAccessIo::read_json(path.string(), {}, 4096, raw);
+    AstraSim::ServiceBindingJson::fields(policy, {"schema", "positions"});
+    const auto& positions = policy.at("positions");
+    if (policy.at("schema") != schema || !positions.is_array())
+        throw std::invalid_argument("invalid joint recording policy");
+
+    // Use the same canonical ordering as the producer. Unknown or repeated entries are invalid.
+    auto canonical = JointRuntimeClient::Json::array();
+    for (const auto* name : {"outer", "akita", "cx", "order"})
+        if (std::find(positions.begin(), positions.end(), name) != positions.end()) canonical.push_back(name);
+    if (positions != canonical) throw std::invalid_argument("invalid joint recording positions");
+    return !positions.empty() && positions.front() == "outer";
+}
+}  // namespace
+
 bool JointRuntimeClient::active_ = false;
 
 uint64_t JointRuntimeClient::decimal(const Json& value) {
@@ -149,10 +174,13 @@ void JointRuntimeClient::start(const std::string& path) {
             throw std::invalid_argument("invalid runtime argv");
     args.insert(args.end(), {"--config", path});
     const std::filesystem::path output = config_.at("output").get<std::string>();
+    const bool write_transcript = record_outer(config_, path);
     if (!std::filesystem::create_directory(output))
         throw std::invalid_argument("runtime output must be fresh");
-    transcript_.open(output / "runtime.jsonl");
-    if (!transcript_) throw std::runtime_error("cannot create runtime transcript");
+    if (write_transcript) {
+        transcript_.open(output / "runtime.jsonl");
+        if (!transcript_) throw std::runtime_error("cannot create runtime transcript");
+    }
     int to_child[2], from_child[2], from_stderr[2];
     if (pipe2(to_child, O_CLOEXEC) != 0) throw std::runtime_error("runtime input pipe failed");
     if (pipe2(from_child, O_CLOEXEC) != 0) {
@@ -280,14 +308,16 @@ JointRuntimeClient::Json JointRuntimeClient::exchange(const std::string& command
     const auto frame = request.dump() + "\n";
     if (frame.size() > frame_limit_) throw std::runtime_error("runtime command byte limit");
     const auto reply = AstraSim::ServiceBindingJson::parse(transact(frame));
-    const auto record = Json{{"command", request}, {"reply", reply}}.dump() + "\n";
-    if (transcript_bytes_ > transcript_limit_ || record.size() > transcript_limit_ - transcript_bytes_) {
-        transcript_bytes_ = transcript_limit_ + 1;  // Preserve rejection on subsequent calls.
-        throw std::runtime_error("runtime transcript budget exhausted");
+    if (transcript_.is_open()) {
+        const auto record = Json{{"command", request}, {"reply", reply}}.dump() + "\n";
+        if (transcript_bytes_ > transcript_limit_ || record.size() > transcript_limit_ - transcript_bytes_) {
+            transcript_bytes_ = transcript_limit_ + 1;  // Preserve rejection on subsequent calls.
+            throw std::runtime_error("runtime transcript budget exhausted");
+        }
+        transcript_bytes_ += record.size();
+        transcript_ << record << std::flush;
+        if (!transcript_) throw std::runtime_error("runtime transcript write failed");
     }
-    transcript_bytes_ += record.size();
-    transcript_ << record << std::flush;
-    if (!transcript_) throw std::runtime_error("runtime transcript write failed");
     if (reply.size() != 5 || reply.at("version") != request["version"] ||
         reply.at("run_id") != request["run_id"] || reply.at("session_id") != request["session_id"] ||
         decimal(reply.at("seq")) != sequence_ || !reply.at("body").is_object())
