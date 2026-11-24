@@ -31,6 +31,7 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     Json successor(const Json& manifest);
     void check_workload(const std::string& prefix, const std::vector<AstraSim::Workload*>& targets);
     void advance();
+    void observe_view_completion();
     void safe_point();
     void deadline(uint32_t endpoint, uint64_t when_ns, uint64_t generation);
     void enqueue_receive(uint64_t completed_fs, std::function<void(Service::ReceiveEdge)> callback);
@@ -75,6 +76,15 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     using Candidates = std::map<std::string, std::pair<uint64_t, Json>>;
     uint64_t mw_per_call_ = 0;
     bool mw_retry_step_ = false;
+    bool in_process_ = false, exact_memory_retry_ = false;
+    bool phase_timing_ = false;
+    std::optional<uint64_t> phase_target_;
+    std::optional<std::set<uint64_t>> memory_controls_fs_;
+    uint64_t phase_start_ns_ = 0;
+    void begin_view_timing();
+    bool waiting_for_supply(const std::string& domain) const;
+    void advance_memory(const Candidates& candidates, const std::string& chosen, uint64_t first);
+    void install_memory_grant(const Json& grant, const Json& reply, uint64_t before);
     std::map<std::string, uint64_t> mw_fallbacks_;
     bool advance_mw(const Candidates& candidates, const std::string& chosen, uint64_t first);
     bool advance_cx(const Candidates& candidates, const std::string& chosen, uint64_t first);

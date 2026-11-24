@@ -34,6 +34,10 @@ using namespace NetworkAnalytical;
 using namespace NetworkAnalyticalCongestionUnaware;
 using namespace std;
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string(argv[1]) == "--joint-memory-grant-capability") {
+        std::cout << "joint-memory-grant-v1" << std::endl;
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--joint-transcript-capability") {
         std::cout << "joint-runtime-transcript-budget-v1" << std::endl;
         return 0;
@@ -418,6 +422,7 @@ int main(int argc, char* argv[]) {
       bool asked_any = false;
       if (joint) {
         joint->advance();
+        joint->observe_view_completion();
 #ifdef JOINT_RUNTIME_TEST_OBSERVE
         JOINT_RUNTIME_TEST_OBSERVE(joint, systems, event_queue);
 #endif
