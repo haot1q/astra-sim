@@ -7,6 +7,9 @@ LICENSE file in the root directory of this source tree.
 
 #include <algorithm>
 #include <charconv>
+#include <cstdlib>
+#include <fstream>
+#include <streambuf>
 #include <iomanip>
 #include <memory>
 #include <openssl/evp.h>
@@ -42,11 +45,11 @@ int open_without_symlink_traversal(const std::string& path) {
 
 class CheckedFile {
   public:
-    CheckedFile(const std::string& path, uint64_t cap) : path_(path) {
+    CheckedFile(const std::string& path, std::optional<uint64_t> cap) : path_(path) {
         fd_ = open_without_symlink_traversal(path);
         if (fd_ < 0) throw std::invalid_argument("joint access: cannot open regular file");
         if (fstat(fd_, &initial_) || !S_ISREG(initial_.st_mode) ||
-            initial_.st_size < 0 || static_cast<uint64_t>(initial_.st_size) > cap) {
+            initial_.st_size < 0 || (cap && static_cast<uint64_t>(initial_.st_size) > *cap)) {
             close(fd_);
             throw std::invalid_argument("joint access: file type or byte budget");
         }
@@ -92,6 +95,69 @@ class CheckedFile {
     int fd_ = -1;
     struct stat initial_{};
     uint64_t remaining_ = 0;
+};
+
+class Sha256 {
+  public:
+    Sha256() {
+        if (!state_ || EVP_DigestInit_ex(state_.get(), EVP_sha256(), nullptr) != 1)
+            throw std::runtime_error("joint access: cannot initialize SHA-256");
+    }
+    void update(const std::string& bytes) {
+        if (EVP_DigestUpdate(state_.get(), bytes.data(), bytes.size()) != 1)
+            throw std::runtime_error("joint access: cannot hash file");
+    }
+    std::string finish() {
+        unsigned char bytes[EVP_MAX_MD_SIZE];
+        unsigned int length = 0;
+        if (EVP_DigestFinal_ex(state_.get(), bytes, &length) != 1 || length != 32)
+            throw std::runtime_error("joint access: cannot finalize SHA-256");
+        std::ostringstream hex;
+        hex << std::hex << std::setfill('0');
+        for (unsigned int i = 0; i < length; ++i) hex << std::setw(2) << unsigned(bytes[i]);
+        return hex.str();
+    }
+  private:
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> state_{EVP_MD_CTX_new(), EVP_MD_CTX_free};
+};
+
+// The document owns the parsed tables. No second whole-file byte buffer is needed.
+class HashedJsonInput : public std::streambuf {
+  public:
+    HashedJsonInput(CheckedFile& file, uint64_t string_bytes) : file_(file), raw_token_limit_(6 * string_bytes) {}
+    std::string digest() { return hash_.finish(); }
+  protected:
+    int_type underflow() override {
+        if (!file_.remaining()) return traits_type::eof();
+        chunk_ = file_.take(std::min<uint64_t>(file_.remaining(), 65536));
+        check_token_lengths();
+        hash_.update(chunk_);
+        setg(chunk_.data(), chunk_.data(), chunk_.data() + chunk_.size());
+        return traits_type::to_int_type(*gptr());
+    }
+  private:
+    // The JSON callback enforces decoded lengths. Limit the parser's temporary
+    // token first: one decoded byte can take up to six encoded bytes (\u00XX).
+    void check_token_lengths() {
+        for (const char ch : chunk_) {
+            if (!quoted_) {
+                if (ch == '"') { quoted_ = true; token_bytes_ = 0; }
+                else if ((ch >= '0' && ch <= '9') || ch == '-')
+                    throw std::invalid_argument("joint access: numeric fields require canonical strings");
+            } else if (!escaped_ && ch == '"') {
+                quoted_ = false;
+            } else {
+                if (++token_bytes_ > raw_token_limit_)
+                    throw std::invalid_argument("joint access: oversized JSON token");
+                escaped_ = !escaped_ && ch == '\\';
+            }
+        }
+    }
+    CheckedFile& file_;
+    uint64_t raw_token_limit_, token_bytes_ = 0;
+    bool quoted_ = false, escaped_ = false;
+    Sha256 hash_;
+    std::string chunk_;
 };
 
 void read_frame(CheckedFile& file, google::protobuf::Message& message, uint64_t cap) {
@@ -183,11 +249,47 @@ std::array<uint64_t, 7> file_identity(const std::string& path) {
         static_cast<uint64_t>(value.st_ctim.tv_nsec)};
 }
 
-Json read_json(const std::string& path, const JointAccessLimits& limits,
-               uint64_t cap, std::string& raw) {
+void verify_whole_job_scope() {
+    const char* declared = std::getenv("CX_EXPERIMENT_MEMORY_SCOPE");
+    std::ifstream membership("/proc/self/cgroup");
+    std::string line;
+    while (std::getline(membership, line) && line.compare(0, 3, "0::") != 0) {}
+    const std::filesystem::path scope(declared ? declared : "");
+    if (!scope.is_absolute() || scope == "/" || scope.lexically_normal() != scope ||
+        line.compare(0, 3, "0::") != 0)
+        throw std::invalid_argument("joint access: process outside declared cgroup v2 job");
+    // The kernel enforces the declared root's memory controls for every descendant.
+    const std::filesystem::path current(line.substr(3));
+    const auto relative = current.lexically_relative(scope);
+    if (relative.empty() || *relative.begin() == "..")
+        throw std::invalid_argument("joint access: process outside declared cgroup v2 job");
+    const auto root = std::filesystem::path("/sys/fs/cgroup") / scope.relative_path();
+    auto field = [&](const char* name) {
+        std::ifstream input(root / name);
+        std::string value;
+        if (!std::getline(input, value)) throw std::invalid_argument("joint access: unreadable cgroup control");
+        return value;
+    };
+    u64(field("memory.max"), true);
+    if (field("memory.swap.max") != "0" || field("memory.oom.group") != "1")
+        throw std::invalid_argument("joint access: cgroup requires disabled swap and group OOM");
+}
+
+bool whole_job_runtime(const Json& config) {
+    if (!config.contains("host_budget_policy")) return false;
+    if (config.at("host_budget_policy") != "cgroup-v2-whole-job-v1" ||
+        config.value("memory_engine", std::string()) != "in-process")
+        throw std::invalid_argument("unsupported joint host budget policy");
+    verify_whole_job_scope();
+    return true;
+}
+
+JsonFile read_json(const std::string& path, const JointAccessLimits& limits,
+                   std::optional<uint64_t> cap) {
     CheckedFile file(path, cap);
-    raw = file.take(file.remaining());
-    file.verify();
+    const auto size = file.remaining();
+    HashedJsonInput buffer(file, limits.string_bytes);
+    std::istream stream(&buffer);
     std::vector<std::set<std::string>> keys;
     auto callback = [&](int depth, Json::parse_event_t event, Json& value) {
         if (depth < 0 || static_cast<uint64_t>(depth) > limits.json_depth) {
@@ -210,7 +312,9 @@ Json read_json(const std::string& path, const JointAccessLimits& limits,
         }
         return true;
     };
-    return Json::parse(raw, callback);
+    auto document = Json::parse(stream, callback);
+    file.verify();
+    return {std::move(document), size, buffer.digest()};
 }
 
 Attributes attributes(const google::protobuf::RepeatedPtrField<ChakraProtoMsg::AttributeProto>& attrs) {
@@ -226,27 +330,16 @@ Attributes attributes(const google::protobuf::RepeatedPtrField<ChakraProtoMsg::A
 void verify_unobserved_et(const std::string& path, const JointAccessLimits& limits,
                           const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,
                           const std::string& expected_body_sha256) {
-    CheckedFile file(path, limits.et_bytes);
+    CheckedFile file(path, limits.total_limit(limits.et_bytes));
     file.reject_gzip();
     ChakraProtoMsg::GlobalMetadata header;
     read_frame(file, header, limits.frame_bytes);
     metadata(header);
-    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-    if (!file.remaining() || !digest || EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1)
-        throw std::invalid_argument("joint access: empty or unverifiable unobserved ET");
-    while (file.remaining()) {
-        const auto chunk = file.take(std::min<uint64_t>(file.remaining(), 1U << 20));
-        if (EVP_DigestUpdate(digest.get(), chunk.data(), chunk.size()) != 1)
-            throw std::runtime_error("joint access: cannot hash unobserved ET");
-    }
-    unsigned char bytes[EVP_MAX_MD_SIZE];
-    unsigned int length = 0;
-    if (EVP_DigestFinal_ex(digest.get(), bytes, &length) != 1 || length != 32)
-        throw std::runtime_error("joint access: cannot finalize unobserved ET digest");
-    std::ostringstream hex;
-    hex << std::hex << std::setfill('0');
-    for (unsigned int i = 0; i < length; ++i) hex << std::setw(2) << unsigned(bytes[i]);
-    if (hex.str() != expected_body_sha256)
+    if (!file.remaining()) throw std::invalid_argument("joint access: empty unobserved ET");
+    Sha256 digest;
+    while (file.remaining())
+        digest.update(file.take(std::min<uint64_t>(file.remaining(), 1U << 20)));
+    if (digest.finish() != expected_body_sha256)
         throw std::invalid_argument("joint access: unobserved ET body differs from verified source");
     file.verify();
 }
@@ -254,7 +347,7 @@ void verify_unobserved_et(const std::string& path, const JointAccessLimits& limi
 void scan_et(const std::string& path, const JointAccessLimits& limits,
              const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,
              const std::function<void(const ChakraProtoMsg::Node&)>& node) {
-    CheckedFile file(path, limits.et_bytes);
+    CheckedFile file(path, limits.total_limit(limits.et_bytes));
     file.reject_gzip();
     ChakraProtoMsg::GlobalMetadata header;
     read_frame(file, header, limits.frame_bytes);
@@ -262,7 +355,7 @@ void scan_et(const std::string& path, const JointAccessLimits& limits,
     uint64_t count = 0;
     std::set<uint64_t> ids;
     while (file.remaining()) {
-        if (++count > limits.et_nodes) throw std::invalid_argument("joint access: ET node budget");
+        if (!limits.admits_total(++count, limits.et_nodes)) throw std::invalid_argument("joint access: ET node budget");
         ChakraProtoMsg::Node current;
         read_frame(file, current, limits.frame_bytes);
         if (!ids.insert(current.id()).second) throw std::invalid_argument("joint access: duplicate ET node");
@@ -277,12 +370,17 @@ namespace AstraSim {
 std::shared_ptr<JointSourceContext> JointSourceContext::load(const std::string& path) {
     using namespace JointAccessIo;
     auto result = std::shared_ptr<JointSourceContext>(new JointSourceContext());
-    std::string raw;
-    auto& identity = result->identity_;
-    identity = read_json(path, result->limits_, result->limits_.context_bytes, raw);
+    auto admitted = read_json(path, result->limits_, result->limits_.context_bytes);
+    auto& identity = result->identity_ = std::move(admitted.value);
     ServiceBindingJson::fields(identity, {"schema", "mode", "run_id", "source_provenance_digest",
         "source_profile", "source_selection_sha256", "ranks", "limits"});
-    if (identity.at("schema") != "joint-source-context-v1" ||
+    result->limits_.whole_job = identity.at("schema") == "joint-source-context-v2";
+    if (result->limits_.whole_job) {
+        if (identity.at("mode") != "external_source_service")
+            throw std::invalid_argument("joint access: whole-job context requires the external Source service");
+        verify_whole_job_scope();
+    }
+    if ((!result->limits_.whole_job && identity.at("schema") != "joint-source-context-v1") ||
         (identity.at("mode") != "association_only" && identity.at("mode") != "external_source_service")) {
         throw std::invalid_argument("joint access: unsupported context version/mode");
     }
@@ -304,16 +402,18 @@ std::shared_ptr<JointSourceContext> JointSourceContext::load(const std::string& 
         {"live_index_charge_bytes", &JointAccessLimits::live_index_charge_bytes}, {"live_pieces", &JointAccessLimits::live_pieces}};
     for (auto [key, member] : fields) {
         auto value = u64(limits.at(key), true);
-        if (value > result->limits_.*member) throw std::invalid_argument("joint access: limit exceeds admitted cap");
+        const bool structural = member == &JointAccessLimits::context_bytes || member == &JointAccessLimits::json_depth ||
+            member == &JointAccessLimits::string_bytes || member == &JointAccessLimits::frame_bytes ||
+            member == &JointAccessLimits::pending_graphs_per_rank;
+        if ((structural || !result->limits_.whole_job) && value > result->limits_.*member) throw std::invalid_argument("joint access: limit exceeds admitted cap");
         result->limits_.*member = value;
     }
-    if (raw.size() > result->limits_.context_bytes) throw std::invalid_argument("joint access: context byte budget");
+    if (admitted.bytes > result->limits_.context_bytes) throw std::invalid_argument("joint access: context byte budget");
     // Enforce caller-lowered string/depth limits on the context itself, too.
-    std::string confirmed;
-    read_json(path, result->limits_, result->limits_.context_bytes, confirmed);
-    if (confirmed != raw) throw std::invalid_argument("joint access: context changed during admission");
+    auto confirmed = read_json(path, result->limits_, result->limits_.context_bytes);
+    if (confirmed.sha256 != admitted.sha256) throw std::invalid_argument("joint access: context changed during admission");
     const auto& ranks = ServiceBindingJson::array(identity.at("ranks"));
-    if (ranks.empty() || ranks.size() > result->limits_.table_records) {
+    if (ranks.empty() || !result->limits_.admits_total(ranks.size(), result->limits_.table_records)) {
         throw std::invalid_argument("joint access: rank budget");
     }
     uint64_t previous = 0;
@@ -328,10 +428,13 @@ std::shared_ptr<JointSourceContext> JointSourceContext::load(const std::string& 
 }
 
 void JointSourceContext::reserve(uint64_t bytes, uint64_t pieces) {
-    if (bytes > limits_.live_index_charge_bytes - live_bytes_ || pieces > limits_.live_pieces - live_pieces_) {
+    const auto next_bytes = JointAccessIo::add(live_bytes_, bytes);
+    const auto next_pieces = JointAccessIo::add(live_pieces_, pieces);
+    if (!limits_.admits_total(next_bytes, limits_.live_index_charge_bytes) ||
+        !limits_.admits_total(next_pieces, limits_.live_pieces)) {
         throw std::invalid_argument("joint access: aggregate live index budget");
     }
-    live_bytes_ += bytes; live_pieces_ += pieces;
+    live_bytes_ = next_bytes; live_pieces_ = next_pieces;
 }
 
 void JointSourceContext::release(uint64_t bytes, uint64_t pieces) noexcept {

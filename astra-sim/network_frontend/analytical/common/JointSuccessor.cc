@@ -18,10 +18,10 @@ using Json = JointRuntimeClient::Json;
 using AstraSim::ServiceBindingJson::fields;
 uint64_t number(const Json& value) { return JointRuntimeClient::decimal(value); }
 
-Json original_ref(const std::string& path) {
+Json original_ref(const std::string& path, std::optional<uint64_t> cap) {
     namespace fs = std::filesystem;
     const auto identity = AstraSim::JointAccessIo::file_identity(path);
-    if (fs::canonical(path).string() != path || !fs::is_regular_file(path) || fs::file_size(path) > (256U << 20))
+    if (fs::canonical(path).string() != path || !fs::is_regular_file(path) || (cap && fs::file_size(path) > *cap))
         throw std::invalid_argument("control original path or size differs");
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(EVP_MD_CTX_new(), EVP_MD_CTX_free);
     if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1)
@@ -30,11 +30,11 @@ Json original_ref(const std::string& path) {
     char data[65536]; uint64_t count = 0;
     while (stream.read(data, sizeof(data)) || stream.gcount()) {
         count += stream.gcount();
-        if (count > (256U << 20) || EVP_DigestUpdate(hash.get(), data, stream.gcount()) != 1)
+        if (count > identity[2] || EVP_DigestUpdate(hash.get(), data, stream.gcount()) != 1)
             throw std::runtime_error("control original hash/read failed");
     }
     unsigned char digest[EVP_MAX_MD_SIZE]; unsigned size = 0;
-    if (!stream.eof() || identity != AstraSim::JointAccessIo::file_identity(path) ||
+    if (!stream.eof() || count != identity[2] || identity != AstraSim::JointAccessIo::file_identity(path) ||
         EVP_DigestFinal_ex(hash.get(), digest, &size) != 1 || size != 32)
         throw std::runtime_error("control original changed");
     std::ostringstream hex; hex << std::hex << std::setfill('0');
@@ -69,8 +69,8 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::inspect_control(
             (!kind.empty() && actual != kind) || index->binding_count())
             throw std::invalid_argument("successive control must be an original uniform non-memory cohort");
         kind = actual;
-        graphs.push_back({{"rank", std::to_string(rank)}, {"et", original_ref(path)},
-            {"companion", original_ref(path + ".joint-access.json")}});
+        graphs.push_back({{"rank", std::to_string(rank)}, {"et", original_ref(path, graph_file_limit())},
+            {"companion", original_ref(path + ".joint-access.json", graph_file_limit())}});
         indexes.push_back(std::move(index));
     }
     return {{"kind", kind}, {"execution_iteration", std::to_string(iteration)},
@@ -103,7 +103,7 @@ void JointSimulationCoordinator::check_workload(const std::string& prefix,
         const auto found = std::find_if(cohort.at("graphs").begin(), cohort.at("graphs").end(),
             [&](const auto& graph) { return number(graph.at("rank")) == rank; });
         if (found == cohort.at("graphs").end()) throw std::invalid_argument("cohort graph rank missing");
-        for (const auto key : {"et", "companion"}) JointRuntimeClient::original(found->at(key), 256U << 20);
+        for (const auto key : {"et", "companion"}) JointRuntimeClient::original(found->at(key), graph_file_limit());
     }
     // Invalid late ranks/files do not partially consume earlier rank admission.
     if (changed) { control_ = std::move(cohort); retired_business_ = retired; }
@@ -122,7 +122,7 @@ void JointSimulationCoordinator::validate_business_graphs(const Json& manifest, 
         if (number(graph.at("rank")) != static_cast<uint64_t>(workload->sys->id) ||
             graph.at("et").at("path") != path || graph.at("companion").at("path") != path + ".joint-access.json")
             throw std::invalid_argument("successor actual graph path/rank differs");
-        for (const auto key : {"et", "companion"}) JointRuntimeClient::original(graph.at(key), 256U << 20);
+        for (const auto key : {"et", "companion"}) JointRuntimeClient::original(graph.at(key), graph_file_limit());
         auto index = AstraSim::JointAccessIndex::load_and_validate(path, workload->sys->joint_source_context,
             workload->sys->id, iteration, &workload->sys->memory_tiers);
         if (index->kind() != "business") throw std::invalid_argument("successor is not actual business");
@@ -140,7 +140,7 @@ void JointSimulationCoordinator::check_successor_facts(const Json& value, const 
                    "acks", "resources_retired", "observed_at_ns"});
     const auto sequence = number(view_identity_.at("view_sequence"));
     const auto& control = facts.at("control"); fields(control, {"kind", "iteration", "acks"});
-    if (sequence == UINT64_MAX || value.at("schema") != "simulator-joint-successor-v1" ||
+    if (sequence == UINT64_MAX || value.at("schema") != (whole_job_ ? "simulator-joint-successor-v2" : "simulator-joint-successor-v1") ||
         facts.at("schema") != "simulator-successor-facts-v1" || facts.at("session_id") != config_.at("session_id") ||
         number(facts.at("view_sequence")) != sequence + 1 || number(facts.at("model_sequence")) != sequence + 1 ||
         number(facts.at("model_rounds_before")) != sequence + 1 || fs(number(facts.at("prepared_at_ns"))) != cut ||

@@ -21,8 +21,15 @@ std::string hash(const Json& value);
 uint64_t add(uint64_t first, uint64_t second);
 uint64_t multiply(uint64_t first, uint64_t second);
 std::array<uint64_t, 7> file_identity(const std::string& path);
-Json read_json(const std::string& path, const JointAccessLimits& limits,
-               uint64_t cap, std::string& raw);
+void verify_whole_job_scope();
+bool whole_job_runtime(const Json& config);
+struct JsonFile {
+    Json value;
+    uint64_t bytes;
+    std::string sha256;
+};
+JsonFile read_json(const std::string& path, const JointAccessLimits& limits,
+               std::optional<uint64_t> cap);
 Attributes attributes(const google::protobuf::RepeatedPtrField<ChakraProtoMsg::AttributeProto>& attrs);
 void verify_unobserved_et(const std::string& path, const JointAccessLimits& limits,
                           const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,

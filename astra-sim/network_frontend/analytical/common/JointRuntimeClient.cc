@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <openssl/evp.h>
 #include "astra-sim/workload/JointAccessIo.hh"
 #include <limits>
@@ -32,8 +33,7 @@ bool record_outer(const JointRuntimeClient::Json& config, const std::filesystem:
         throw std::invalid_argument("unsupported joint recording policy");
 
     const auto path = config_path.parent_path() / "runtime-recording.json";
-    std::string raw;
-    const auto policy = AstraSim::JointAccessIo::read_json(path.string(), {}, 4096, raw);
+    const auto policy = AstraSim::JointAccessIo::read_json(path.string(), {}, 4096).value;
     AstraSim::ServiceBindingJson::fields(policy, {"schema", "positions"});
     const auto& positions = policy.at("positions");
     if (policy.at("schema") != schema || !positions.is_array())
@@ -64,14 +64,14 @@ uint64_t JointRuntimeClient::decimal(const Json& value) {
     return result;
 }
 
-std::string JointRuntimeClient::original(const Json& ref, uint64_t cap, bool retain) {
+std::string JointRuntimeClient::original(const Json& ref, std::optional<uint64_t> cap, bool retain) {
     AstraSim::ServiceBindingJson::fields(ref, {"path", "size_bytes", "sha256"});
     const auto path = ref.at("path").get<std::string>();
     if (std::filesystem::canonical(path).string() != path || !std::filesystem::is_regular_file(path))
         throw std::invalid_argument("activation requires a canonical regular original");
     const auto before = AstraSim::JointAccessIo::file_identity(path);
     const auto expected = decimal(ref.at("size_bytes"));
-    if (expected > cap || std::filesystem::file_size(path) != expected)
+    if ((cap && expected > *cap) || std::filesystem::file_size(path) != expected)
         throw std::invalid_argument("activation original byte limit");
     std::ifstream input(path, std::ios::binary);
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(EVP_MD_CTX_new(), EVP_MD_CTX_free);
@@ -82,7 +82,7 @@ std::string JointRuntimeClient::original(const Json& ref, uint64_t cap, bool ret
     std::string contents;
     while (input.read(buffer, sizeof(buffer)) || input.gcount()) {
         count += input.gcount();
-        if (count > cap || EVP_DigestUpdate(hash.get(), buffer, input.gcount()) != 1)
+        if (count > expected || EVP_DigestUpdate(hash.get(), buffer, input.gcount()) != 1)
             throw std::runtime_error("activation original read exceeded budget");
         if (retain) contents.append(buffer, input.gcount());
     }
@@ -123,6 +123,9 @@ JointRuntimeClient::JointRuntimeClient(const std::string& path) {
     if (!input.eof() || configuration.size() > (1U << 20))
         throw std::invalid_argument("runtime configuration changed or exceeds limit");
     config_ = AstraSim::ServiceBindingJson::parse(configuration);
+    whole_job_ = AstraSim::JointAccessIo::whole_job_runtime(config_);
+    if (whole_job_ && !decimal(config_.at("limits").at("ipc_calls")))
+        throw std::invalid_argument("invalid historical IPC budget");
     if (config_.at("version") != "joint-runtime-v1")
         throw std::invalid_argument("unknown joint runtime version");
     frame_limit_ = decimal(config_.at("limits").at("frame_bytes"));
@@ -300,8 +303,9 @@ std::string JointRuntimeClient::transact(const std::string& frame) {
 }
 
 JointRuntimeClient::Json JointRuntimeClient::exchange(const std::string& command, const Json& body) {
-    if (terminal_ || ++calls_ > decimal(config_.at("limits").at("ipc_calls")))
+    if (terminal_ || calls_ == UINT64_MAX || (!whole_job_ && calls_ >= decimal(config_.at("limits").at("ipc_calls"))))
         throw std::runtime_error("runtime IPC budget or closed session");
+    ++calls_;
     Json request{{"version", "joint-runtime-v1"}, {"run_id", config_.at("run_id")},
         {"session_id", config_.at("session_id")}, {"seq", std::to_string(sequence_)},
         {"command", command}, {"body", body}};
@@ -386,6 +390,7 @@ void JointRuntimeClient::close() {
     }
     cleanup();
     if (!clean) throw std::runtime_error("runtime nonzero exit or leaked child");
+    if (whole_job_) std::clog << "joint-runtime-ipc-calls " << calls_ << '\n';
 }
 
 JointRuntimeClient::~JointRuntimeClient() {

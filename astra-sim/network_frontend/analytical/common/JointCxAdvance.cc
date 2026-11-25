@@ -40,7 +40,7 @@ bool JointSimulationCoordinator::advance_cx(const Candidates& candidates,
     if (first == frontier_fs_ && same_time_ >= limit("same_time_events"))
         throw std::runtime_error("joint event budget exhausted before CX grant");
     const auto first_same = first == frontier_fs_ ? same_time_ + 1 : 1;
-    if (events_ > limit("events") || limit("events") - events_ < kMaxBeforeBatches ||
+    if (!admits_events(kMaxBeforeBatches) ||
         idle_base > limit("no_progress_events") || limit("no_progress_events") - idle_base < reserve_idle ||
         first_same > limit("same_time_events")) return false;
 

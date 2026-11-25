@@ -96,11 +96,16 @@ int main(int argc, char** argv) {
         require(prctl(PR_SET_CHILD_SUBREAPER, wanted) == 0, "test cannot set subreaper");
         if (file_budget_scenario(path, scenario)) {
             require(childless(), "file budget failure leaked a child");
+        } else if (scenario == "legacy-ipc-limit") {
+            Client client(path);
+            require(client.exchange("open").at("echo") == "open", "first permitted IPC failed");
+            rejects_with([&] { client.close(); }, "runtime IPC budget or closed session");
         } else if (scenario == "normal" || scenario == "restore-one") {
             Client client(path);
             rejects([&] { Client second(path); });
             require(client.exchange("open").at("echo") == "open", "runtime reply not observed");
             client.close();
+            rejects_with([&] { client.exchange("open"); }, "runtime IPC budget or closed session");
             client.close();
         } else {
             auto client = std::make_shared<Client>(path);

@@ -1,5 +1,6 @@
 #include "common/JointSimulationCoordinator.hh"
 #include "astra-sim/workload/Workload.hh"
+#include "astra-sim/workload/JointAccessIo.hh"
 #include "astra-sim/system/Sys.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include <algorithm>
@@ -36,9 +37,19 @@ uint64_t JointSimulationCoordinator::limit(const char* name) const {
     return value;
 }
 
+bool JointSimulationCoordinator::admits_events(uint64_t count) const {
+    if (count > UINT64_MAX - events_) return false;
+    return whole_job_ || events_ + count <= limit("events");
+}
+
+std::optional<uint64_t> JointSimulationCoordinator::graph_file_limit() const {
+    return whole_job_ ? std::nullopt : std::optional<uint64_t>(256U << 20);
+}
+
 JointSimulationCoordinator::JointSimulationCoordinator(
         std::shared_ptr<NetworkAnalytical::EventQueue> queue, Json config, Exchange exchange)
     : queue_(std::move(queue)), config_(std::move(config)), exchange_(std::move(exchange)) {
+    whole_job_ = AstraSim::JointAccessIo::whole_job_runtime(config_);
     for (const auto name : {"pending_nodes", "descriptor_bytes", "callbacks", "events", "same_time_events",
                             "no_progress_events", "horizon_fs", "supply_frames"}) limit(name);
     if (limit("pending_nodes") > 256 || limit("callbacks") > 65536 || limit("supply_frames") > 64)
@@ -51,12 +62,14 @@ JointSimulationCoordinator::JointSimulationCoordinator(
     const auto mode = config_.value("cx_advance_mode", std::string("step"));
     if (mode != "step" && mode != "safe-before-v1") throw std::invalid_argument("invalid CX advance mode");
     const auto mw_mode = config_.value("mw_advance_mode", std::string("step"));
-    if (mw_mode == "safe-before-v1") {
+    if (mw_mode != "step" && mw_mode != "safe-before-v1") throw std::invalid_argument("invalid Akita advance mode");
+    if (mw_mode == "safe-before-v1" || (whole_job_ && in_process_)) {
         const auto& value = config_.at("open").at("engine_budget").at("events_per_call");
         if (!value.is_number_unsigned() || value.get<uint64_t>() == 0)
             throw std::invalid_argument("invalid Akita per-call event budget");
-        mw_per_call_ = value.get<uint64_t>();
-    } else if (mw_mode != "step") throw std::invalid_argument("invalid Akita advance mode");
+        memory_events_per_call_ = value.get<uint64_t>();
+        if (mw_mode == "safe-before-v1") mw_per_call_ = memory_events_per_call_;
+    }
     awaiting_ = config_.contains("activation");
     if (config_.contains("successor")) {
         AstraSim::ServiceBindingJson::fields(config_.at("successor"), {"schema", "manifest_root"});
@@ -74,7 +87,7 @@ JointSimulationCoordinator::JointSimulationCoordinator(
 
 void JointSimulationCoordinator::bind(std::shared_ptr<AstraSim::JointSourceContext> context,
         const std::vector<AstraSim::Workload*>& workloads) {
-    if (service_ || !context || context->identity().at("mode") != "external_source_service" ||
+    if (service_ || !context || whole_job_ != context->limits().whole_job || context->identity().at("mode") != "external_source_service" ||
         context->identity().at("run_id") != config_.at("run_id"))
         throw std::invalid_argument("joint runtime requires its external Source context");
     for (const auto field : {"run_id", "source_provenance_digest", "source_selection_sha256", "ranks"})
@@ -93,6 +106,9 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::activate(const Json
         ref.at("path") != config_.at("activation").at("manifest_path"))
         throw std::invalid_argument("activation requires the original unactivated service");
     activation_ = AstraSim::ServiceBindingJson::parse(JointRuntimeClient::original(ref, 1U << 20, true));
+    if ((whole_job_ && activation_.at("schema") != "simulator-joint-activation-v2") ||
+        (!whole_job_ && activation_.value("schema", std::string()) == "simulator-joint-activation-v2"))
+        throw std::invalid_argument("activation host budget policy differs from Source context");
     const auto& facts = activation_.at("first_business");
     const auto& control = facts.at("control");
     const auto epoch = fs(queue_->get_current_time());
@@ -114,7 +130,7 @@ JointSimulationCoordinator::Json JointSimulationCoordinator::activate(const Json
             workload->iteration != JointRuntimeClient::decimal(ack.at("iteration")) ||
             fs(JointRuntimeClient::decimal(ack.at("finish_ns"))) > epoch)
             throw std::invalid_argument("activation does not match the actual drained rank");
-        for (const auto kind : {"et", "companion"}) JointRuntimeClient::original(graph.at(kind), 256U << 20);
+        for (const auto kind : {"et", "companion"}) JointRuntimeClient::original(graph.at(kind), graph_file_limit());
     }
     return start_service(ref, facts, epoch);
 }
@@ -362,8 +378,10 @@ void JointSimulationCoordinator::advance() {
         same_time_ = 0;
     }
     frontier_fs_ = earliest;
-    if (++events_ > limit("events") || ++same_time_ > limit("same_time_events"))
+    if (!admits_events(1) || same_time_ >= limit("same_time_events"))
         throw std::runtime_error("joint event budget exhausted");
+    ++events_;
+    ++same_time_;
     tie_ = chosen->first;
     if (tie_ == "0") {
         if (queue_->step_at(earliest / 1000000) != EventStepStatus::Executed)
@@ -406,6 +424,7 @@ void JointSimulationCoordinator::finish() {
     };
     while (!drained()) advance();
     call("close");
+    if (whole_job_) std::clog << "joint-coordinator-events " << events_ << '\n';
     if (mw_per_call_) std::clog << "joint-mw-batch-fallbacks " << Json(mw_fallbacks_).dump() << '\n';
     stopped_ = true;
 }

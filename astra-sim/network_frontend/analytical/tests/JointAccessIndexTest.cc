@@ -7,6 +7,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include "astra-sim/system/MemoryTierRegistry.hh"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -216,6 +217,39 @@ void business_contracts(const std::filesystem::path& directory) {
     rejected([&] { JointAccessIndex::load_and_validate(graph.string(), bounded, 0, 1, &tiers); });
     first.reset(); require(bounded->live_charge_bytes() == 0, "index retirement leaked admission charge");
     first = JointAccessIndex::load_and_validate(graph.string(), bounded, 0, 1, &tiers);
+    // The structural checks still run after the joint process group takes over
+    // the cumulative host limits. Legacy callers retain every lowered limit.
+    auto small = context();
+    for (auto key : {"association_bytes", "table_records", "pieces", "et_bytes", "et_nodes",
+                     "live_pieces", "live_index_charge_bytes"}) small["limits"][key] = "1";
+    small["ranks"] = {"0"};
+    write(context_path, small.dump());
+    auto legacy = JointSourceContext::load(context_path.string());
+    rejected([&] { JointAccessIndex::load_and_validate(graph.string(), legacy, 0, 1, &tiers); });
+    small["schema"] = "joint-source-context-v2";
+    write(context_path, small.dump());
+    rejected([&] { JointSourceContext::load(context_path.string()); });
+    small["mode"] = "external_source_service";
+    write(context_path, small.dump());
+    if (const char* scope = std::getenv("CX_EXPERIMENT_MEMORY_SCOPE")) {
+        const std::string restored(scope);
+        setenv("CX_EXPERIMENT_MEMORY_SCOPE", (restored + "-sibling").c_str(), 1);
+        rejected([&] { JointSourceContext::load(context_path.string()); });
+        setenv("CX_EXPERIMENT_MEMORY_SCOPE", restored.c_str(), 1);
+        auto scoped = JointSourceContext::load(context_path.string());
+        auto accepted = JointAccessIndex::load_and_validate(graph.string(), scoped, 0, 1, &tiers);
+        require(accepted->binding_count() == 2 && scoped->live_piece_count() == 4,
+                "whole-job source omitted bindings or live charges");
+        publish(bad);
+        rejected([&] { JointAccessIndex::load_and_validate(graph.string(), scoped, 0, 1, &tiers); });
+        publish(good);
+        small["limits"]["frame_bytes"] = "1";
+        write(context_path, small.dump());
+        scoped = JointSourceContext::load(context_path.string());
+        rejected([&] { JointAccessIndex::load_and_validate(graph.string(), scoped, 0, 1, &tiers); });
+    } else {
+        rejected([&] { JointSourceContext::load(context_path.string()); });
+    }
     write(graph, business_et(good) + "x");
     rejected([&] { first->verify_file_identity(graph.string()); });
     index.reset(); require(run->live_charge_bytes() == 0 && run->live_piece_count() == 0, "failed loads leaked charges");

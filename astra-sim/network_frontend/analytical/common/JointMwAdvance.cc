@@ -34,7 +34,7 @@ bool JointSimulationCoordinator::advance_mw(const Candidates& candidates, const 
     const auto before = JointRuntimeClient::decimal(status_.at("completed_nodes")) +
                         JointRuntimeClient::decimal(status_.at("admitted_nodes"));
     const auto same = first == frontier_fs_ ? same_time_ : 0;
-    if (!remaining(events_, limit("events"), mw_per_call_) ||
+    if (!admits_events(mw_per_call_) ||
         !remaining(same, limit("same_time_events"), mw_per_call_) ||
         !remaining(before == progress_ ? idle_events_ : 0, limit("no_progress_events"), mw_per_call_))
         return fallback("budget");

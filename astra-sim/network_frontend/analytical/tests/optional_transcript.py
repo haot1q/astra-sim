@@ -1,5 +1,6 @@
 """Exercise the live runtime client and its optional outer archive with an echo worker."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,25 +19,30 @@ def echo():
             break
 
 
-def check(client, root, name, marker, sidecar, expected_logging):
+def check(client, root, name, marker, sidecar, expected_logging, *, ipc_limit=4, budget_policy=None, engine="in-process", scenario="normal"):
     case = root / name
     case.mkdir()
     output = case / "output"
     config = dict(version="joint-runtime-v1", run_id="test", session_id="test",
                   worker_argv=[sys.executable, str(Path(__file__).resolve())], output=str(output),
-                  limits=dict(frame_bytes="4096", host_timeout_ms="5000", ipc_calls="4",
+                  limits=dict(frame_bytes="4096", host_timeout_ms="5000", ipc_calls=str(ipc_limit),
                               transcript_bytes="4096" if expected_logging else "1"))
+    if budget_policy is not None:
+        config["host_budget_policy"] = budget_policy
+        config["memory_engine"] = engine
     if marker:
         config["recording"] = {"policy_schema": SCHEMA}
     if sidecar is not None:
         (case / "runtime-recording.json").write_text(sidecar)
     path = case / "runtime-config.json"
     path.write_text(json.dumps(config))
-    result = subprocess.run([client, str(path), "normal"], cwd=case, capture_output=True, timeout=15)
+    result = subprocess.run([client, str(path), scenario], cwd=case, capture_output=True, timeout=15)
     if expected_logging is None:
         assert result.returncode and not output.exists(), (name, result.stderr)
         return
     assert result.returncode == 0, (name, result.stderr)
+    if scenario == "legacy-ipc-limit":
+        return
     log = output / "runtime.jsonl"
     assert log.exists() == expected_logging, name
     if expected_logging:
@@ -50,6 +56,13 @@ def run(client):
         return json.dumps({"schema": SCHEMA, "positions": positions})
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        check(client, root, "legacy-ipc", False, None, True, ipc_limit=1, scenario="legacy-ipc-limit")
+        check(client, root, "unknown-budget", False, None, None, budget_policy="other")
+        check(client, root, "split-budget", False, None, None,
+              budget_policy="cgroup-v2-whole-job-v1", engine="split")
+        check(client, root, "whole-job-ipc", False, None,
+              True if os.getenv("CX_EXPERIMENT_MEMORY_SCOPE") else None,
+              ipc_limit=1, budget_policy="cgroup-v2-whole-job-v1")
         check(client, root, "legacy", False, "invalid and deliberately ignored", True)
         check(client, root, "on", True, policy(["outer", "akita"]), True)
         check(client, root, "off", True, policy([]), False)
