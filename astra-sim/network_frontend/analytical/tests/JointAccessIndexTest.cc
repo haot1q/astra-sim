@@ -231,7 +231,11 @@ void business_contracts(const std::filesystem::path& directory) {
     rejected([&] { JointSourceContext::load(context_path.string()); });
     small["mode"] = "external_source_service";
     write(context_path, small.dump());
-    if (std::getenv("CX_EXPERIMENT_MEMORY_SCOPE")) {
+    if (const char* scope = std::getenv("CX_EXPERIMENT_MEMORY_SCOPE")) {
+        const std::string restored(scope);
+        setenv("CX_EXPERIMENT_MEMORY_SCOPE", (restored + "-sibling").c_str(), 1);
+        rejected([&] { JointSourceContext::load(context_path.string()); });
+        setenv("CX_EXPERIMENT_MEMORY_SCOPE", restored.c_str(), 1);
         auto scoped = JointSourceContext::load(context_path.string());
         auto accepted = JointAccessIndex::load_and_validate(graph.string(), scoped, 0, 1, &tiers);
         require(accepted->binding_count() == 2 && scoped->live_piece_count() == 4,

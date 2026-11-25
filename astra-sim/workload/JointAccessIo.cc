@@ -254,11 +254,16 @@ void verify_whole_job_scope() {
     std::ifstream membership("/proc/self/cgroup");
     std::string line;
     while (std::getline(membership, line) && line.compare(0, 3, "0::") != 0) {}
-    if (!declared || line != "0::" + std::string(declared) ||
-        !std::filesystem::path(declared).is_absolute() || std::string(declared) == "/" ||
-        std::filesystem::path(declared).lexically_normal() != std::filesystem::path(declared))
+    const std::filesystem::path scope(declared ? declared : "");
+    if (!scope.is_absolute() || scope == "/" || scope.lexically_normal() != scope ||
+        line.compare(0, 3, "0::") != 0)
         throw std::invalid_argument("joint access: process outside declared cgroup v2 job");
-    const auto root = std::filesystem::path("/sys/fs/cgroup") / std::filesystem::path(declared).relative_path();
+    // The kernel enforces the declared root's memory controls for every descendant.
+    const std::filesystem::path current(line.substr(3));
+    const auto relative = current.lexically_relative(scope);
+    if (relative.empty() || *relative.begin() == "..")
+        throw std::invalid_argument("joint access: process outside declared cgroup v2 job");
+    const auto root = std::filesystem::path("/sys/fs/cgroup") / scope.relative_path();
     auto field = [&](const char* name) {
         std::ifstream input(root / name);
         std::string value;
