@@ -221,6 +221,44 @@ void business_contracts(const std::filesystem::path& directory) {
     index.reset(); require(run->live_charge_bytes() == 0 && run->live_piece_count() == 0, "failed loads leaked charges");
 }
 
+void unobserved_contracts(const std::filesystem::path& directory) {
+    const auto raw = context();
+    const auto path = directory / "unobserved-context.json";
+    const auto graph = directory / "unobserved.1.et";
+    write(path, raw.dump());
+    auto run = JointSourceContext::load(path.string());
+    auto receipt = business(raw);
+    receipt["schema"] = "joint-unobserved-rank-v1";
+    receipt["execution"]["rank"] = "1";
+    receipt.erase("memory_unassociated");
+    for (auto key : {"bindings", "invocations", "backings", "operands", "pieces", "source_unassociated"})
+        receipt[key] = Json::array();
+    const auto node = memory(99, 1, 8, "");
+    const auto body = frame(node);
+    receipt["omitted"] = {{"body_sha256", AstraSim::ServiceBindingJson::digest_bytes(body).substr(7)},
+        {"original_sha256", std::string(64, 'd')}, {"original_bytes", "1024"},
+        {"counts", {{{"location", "hbm:0"}, {"node_type", "MEM_LOAD_NODE"}, {"nodes", "1"}, {"bytes", "8"}}}}};
+    auto publish = [&](const Json& doc, const std::string& tail) {
+        write(graph.string() + ".joint-access.json", doc.dump());
+        write(graph, header(doc.dump()) + tail);
+    };
+    auto load = [&] { return JointAccessIndex::load_and_validate(graph.string(), run, 1, 1, nullptr); };
+    publish(receipt, body);
+    auto index = load();
+    require(!index->lookup(node, 1, 1), "unobserved node should keep ordinary scheduling");
+    rejected([&] { index->lookup(memory(99, 1, 8, "r1/row7/read/s0"), 1, 1); });
+    publish(receipt, frame(memory(99, 1, 64, "")));
+    rejected(load);
+    auto wrong = receipt;
+    wrong["execution"]["rank"] = "0";
+    publish(wrong, body);
+    rejected(load);
+    wrong = receipt;
+    wrong["bindings"] = business(raw).at("bindings");
+    publish(wrong, body);
+    rejected(load);
+}
+
 void parent_symlink_contracts(const std::filesystem::path& directory) {
     const auto real = directory / "real-inputs";
     const auto alias = directory / "linked-inputs";
@@ -318,6 +356,7 @@ int main() {
     try {
         contracts(directory);
         business_contracts(directory);
+        unobserved_contracts(directory);
         collective_contracts(directory);
         parent_symlink_contracts(directory);
         std::filesystem::remove_all(directory);

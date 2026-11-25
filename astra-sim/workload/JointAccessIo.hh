@@ -24,6 +24,9 @@ std::array<uint64_t, 7> file_identity(const std::string& path);
 Json read_json(const std::string& path, const JointAccessLimits& limits,
                uint64_t cap, std::string& raw);
 Attributes attributes(const google::protobuf::RepeatedPtrField<ChakraProtoMsg::AttributeProto>& attrs);
+void verify_unobserved_et(const std::string& path, const JointAccessLimits& limits,
+                          const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,
+                          const std::string& expected_body_sha256);
 void scan_et(const std::string& path, const JointAccessLimits& limits,
              const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,
              const std::function<void(const ChakraProtoMsg::Node&)>& node);
