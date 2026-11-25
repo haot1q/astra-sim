@@ -5,7 +5,12 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/workload/JointAccessIo.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 
+#include <algorithm>
 #include <charconv>
+#include <iomanip>
+#include <memory>
+#include <openssl/evp.h>
+#include <sstream>
 #include <fcntl.h>
 #include <filesystem>
 #include <limits>
@@ -216,6 +221,34 @@ Attributes attributes(const google::protobuf::RepeatedPtrField<ChakraProtoMsg::A
         }
     }
     return result;
+}
+
+void verify_unobserved_et(const std::string& path, const JointAccessLimits& limits,
+                          const std::function<void(const ChakraProtoMsg::GlobalMetadata&)>& metadata,
+                          const std::string& expected_body_sha256) {
+    CheckedFile file(path, limits.et_bytes);
+    file.reject_gzip();
+    ChakraProtoMsg::GlobalMetadata header;
+    read_frame(file, header, limits.frame_bytes);
+    metadata(header);
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!file.remaining() || !digest || EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1)
+        throw std::invalid_argument("joint access: empty or unverifiable unobserved ET");
+    while (file.remaining()) {
+        const auto chunk = file.take(std::min<uint64_t>(file.remaining(), 1U << 20));
+        if (EVP_DigestUpdate(digest.get(), chunk.data(), chunk.size()) != 1)
+            throw std::runtime_error("joint access: cannot hash unobserved ET");
+    }
+    unsigned char bytes[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    if (EVP_DigestFinal_ex(digest.get(), bytes, &length) != 1 || length != 32)
+        throw std::runtime_error("joint access: cannot finalize unobserved ET digest");
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < length; ++i) hex << std::setw(2) << unsigned(bytes[i]);
+    if (hex.str() != expected_body_sha256)
+        throw std::invalid_argument("joint access: unobserved ET body differs from verified source");
+    file.verify();
 }
 
 void scan_et(const std::string& path, const JointAccessLimits& limits,

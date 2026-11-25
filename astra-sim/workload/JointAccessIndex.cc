@@ -220,7 +220,33 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
                                   context->limits().association_bytes, raw);
     const auto& document = result->document_;
     auto kind = text(document.at("kind"));
-    if (kind == "business") {
+    const bool unobserved = document.at("schema") == "joint-unobserved-rank-v1";
+    if (unobserved) {
+        require(kind == "business" && raw.size() <= 65536, "unobserved rank receipt type or size");
+        fields(document, {"schema", "kind", "execution", "source_profile", "source_selection_sha256",
+            "association_input_sha256", "invocations", "backings", "operands", "pieces", "bindings",
+            "source_unassociated", "omitted"});
+        hash(document.at("association_input_sha256"));
+        for (auto key : {"bindings", "invocations", "backings", "operands", "pieces", "source_unassociated"})
+            require(array(document.at(key)).empty(), "unobserved rank carries selected work");
+        const auto& proof = document.at("omitted");
+        fields(proof, {"body_sha256", "original_sha256", "original_bytes", "counts"});
+        hash(proof.at("body_sha256"));
+        hash(proof.at("original_sha256"));
+        require(u64(proof.at("original_bytes"), true) <= context->limits().association_bytes,
+                "original companion exceeds byte budget");
+        uint64_t count = 0;
+        std::set<std::pair<std::string, std::string>> kinds;
+        for (const auto& item : array(proof.at("counts"))) {
+            fields(item, {"node_type", "location", "bytes", "nodes"});
+            node_type(item);
+            require(kinds.emplace(text(item.at("location")), text(item.at("node_type"))).second,
+                    "duplicate unobserved memory subtotal");
+            u64(item.at("bytes"));
+            count = add(count, u64(item.at("nodes"), true));
+        }
+        require(count <= context->limits().et_nodes, "unobserved ET node budget");
+    } else if (kind == "business") {
         fields(document, {"schema", "kind", "execution", "source_profile", "source_selection_sha256",
             "association_input_sha256", "invocations", "backings", "operands", "pieces", "bindings",
             "source_unassociated", "memory_unassociated"});
@@ -230,7 +256,7 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
         require(kind == "bootstrap" || kind == "idle" || kind == "dep_forward" || kind == "dep_finish",
                 "unknown control kind");
     }
-    require(document.at("schema") == "joint-access-companion-v1", "unsupported companion version");
+    require(unobserved || document.at("schema") == "joint-access-companion-v1", "unsupported companion version");
     const auto& execution = document.at("execution");
     fields(execution, {"run_id", "source_provenance_digest", "rank", "execution_iteration"});
     require(execution.at("run_id") == context->identity().at("run_id") &&
@@ -241,7 +267,7 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
             "execution identity differs from actual owner");
     result->rank_ = rank; result->iteration_ = iteration;
     uint64_t records = 0;
-    if (kind == "business") {
+    if (!unobserved && kind == "business") {
         result->validate_business(context->limits());
         for (auto key : {"invocations", "backings", "operands", "pieces", "bindings", "source_unassociated", "memory_unassociated"}) {
             records = add(records, document.at(key).size());
@@ -384,7 +410,8 @@ void JointAccessIndex::validate_et(const std::string& path, const MemoryTierRegi
                                   const std::string& companion_hash) {
     const bool business = document_.at("kind") == "business";
     std::unordered_map<uint64_t, const Json*> inventory;
-    if (business) {
+    const bool unobserved = document_.at("schema") == "joint-unobserved-rank-v1";
+    if (business && !unobserved) {
         for (auto key : {"bindings", "memory_unassociated"}) {
             for (const auto& item : document_.at(key)) inventory.emplace(u64(item.at("final_node_id")), &item);
         }
@@ -397,6 +424,10 @@ void JointAccessIndex::validate_et(const std::string& path, const MemoryTierRegi
         require(version.has_string_val() && version.string_val() == "1" && digest.has_string_val() &&
                 digest.string_val() == companion_hash, "ET companion version/hash mismatch");
     };
+    if (unobserved) {
+        verify_unobserved_et(path, context_->limits(), metadata, hash(document_.at("omitted").at("body_sha256")));
+        return;
+    }
     auto consume = [&](const ChakraProtoMsg::Node& node) {
         auto attrs = attributes(node.attr());
         if (!business) {
