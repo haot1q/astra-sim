@@ -25,8 +25,8 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::invalid_argument(std::string("joint access: ") + message);
 }
 
-void table(const Json& entries, uint64_t maximum) {
-    require(array(entries).size() <= maximum, "table record budget");
+void table(const Json& entries, const JointAccessLimits& limits, uint64_t maximum) {
+    require(limits.admits_total(array(entries).size(), maximum), "table record budget");
     for (size_t i = 0; i < entries.size(); ++i) {
         require(u64(entries[i].at("ref")) == i, "table ref must equal its index");
     }
@@ -81,7 +81,8 @@ void validate_operands(const Json& document, const JointAccessLimits& limits) {
                 (operation == "write" && origin == "writes"), "operand origin/direction mismatch");
         auto occurrences = u64(item.at("count"), true);
         count = add(count, occurrences);
-        require(count <= limits.table_records, "expanded occurrence budget");
+        require(limits.admits_total(count, limits.table_records), "expanded occurrence budget");
+        require(count <= array(document.at("pieces")).size(), "operand occurrences lack piece coverage");
         auto length = u64(item.at("length_bytes"), true);
         auto extent = u64(reference(document.at("backings"), item.at("backing_ref")).at("extent_bytes"), true);
         require(add(std::max(start(item, 0), start(item, occurrences - 1)), length) <= extent,
@@ -215,14 +216,14 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
     require(context && context->admits_rank(rank), "rank not admitted by expected context");
     auto result = std::unique_ptr<JointAccessIndex>(new JointAccessIndex());
     result->et_identity_ = file_identity(path);
-    std::string raw;
-    result->document_ = read_json(path + ".joint-access.json", context->limits(),
-                                  context->limits().association_bytes, raw);
+    const auto& limits = context->limits();
+    auto file = read_json(path + ".joint-access.json", limits, limits.total_limit(limits.association_bytes));
+    result->document_ = std::move(file.value);
     const auto& document = result->document_;
     auto kind = text(document.at("kind"));
     const bool unobserved = document.at("schema") == "joint-unobserved-rank-v1";
     if (unobserved) {
-        require(kind == "business" && raw.size() <= 65536, "unobserved rank receipt type or size");
+        require(kind == "business" && file.bytes <= 65536, "unobserved rank receipt type or size");
         fields(document, {"schema", "kind", "execution", "source_profile", "source_selection_sha256",
             "association_input_sha256", "invocations", "backings", "operands", "pieces", "bindings",
             "source_unassociated", "omitted"});
@@ -233,7 +234,7 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
         fields(proof, {"body_sha256", "original_sha256", "original_bytes", "counts"});
         hash(proof.at("body_sha256"));
         hash(proof.at("original_sha256"));
-        require(u64(proof.at("original_bytes"), true) <= context->limits().association_bytes,
+        require(limits.admits_total(u64(proof.at("original_bytes"), true), limits.association_bytes),
                 "original companion exceeds byte budget");
         uint64_t count = 0;
         std::set<std::pair<std::string, std::string>> kinds;
@@ -245,7 +246,7 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
             u64(item.at("bytes"));
             count = add(count, u64(item.at("nodes"), true));
         }
-        require(count <= context->limits().et_nodes, "unobserved ET node budget");
+        require(limits.admits_total(count, limits.et_nodes), "unobserved ET node budget");
     } else if (kind == "business") {
         fields(document, {"schema", "kind", "execution", "source_profile", "source_selection_sha256",
             "association_input_sha256", "invocations", "backings", "operands", "pieces", "bindings",
@@ -274,10 +275,10 @@ std::unique_ptr<JointAccessIndex> JointAccessIndex::load_and_validate(
         }
         result->charge_pieces_ = document.at("pieces").size();
     }
-    result->charge_bytes_ = add(raw.size(), multiply(records, 128));
+    result->charge_bytes_ = add(file.bytes, multiply(records, 128));
     context->reserve(result->charge_bytes_, result->charge_pieces_);
     result->context_ = std::move(context);
-    result->validate_et(path, tiers, ServiceBindingJson::digest_bytes(raw).substr(7));
+    result->validate_et(path, tiers, file.sha256);
     result->verify_file_identity(path);
     return result;
 }
@@ -289,14 +290,14 @@ void JointAccessIndex::verify_file_identity(const std::string& path) const {
 void JointAccessIndex::validate_business(const JointAccessLimits& limits) {
     uint64_t count = 0;
     for (auto key : {"invocations", "backings", "operands"}) {
-        table(document_.at(key), limits.table_records);
+        table(document_.at(key), limits, limits.table_records);
         count = add(count, document_.at(key).size());
     }
-    require(count <= limits.table_records, "combined table budget");
-    table(document_.at("pieces"), limits.pieces);
-    require(array(document_.at("bindings")).size() <= limits.et_nodes &&
-            array(document_.at("memory_unassociated")).size() <= limits.et_nodes &&
-            array(document_.at("source_unassociated")).size() <= limits.pieces,
+    require(limits.admits_total(count, limits.table_records), "combined table budget");
+    table(document_.at("pieces"), limits, limits.pieces);
+    require(limits.admits_total(array(document_.at("bindings")).size(), limits.et_nodes) &&
+            limits.admits_total(array(document_.at("memory_unassociated")).size(), limits.et_nodes) &&
+            limits.admits_total(array(document_.at("source_unassociated")).size(), limits.pieces),
             "binding/omission budget");
     validate_backings(document_.at("backings"));
     validate_operands(document_, limits);

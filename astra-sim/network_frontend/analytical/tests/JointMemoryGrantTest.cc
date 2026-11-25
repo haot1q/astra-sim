@@ -1,5 +1,6 @@
 #include "common/JointSimulationCoordinator.hh"
 #include "ExternalMemoryFixture.hh"
+#include <cstdlib>
 #include <deque>
 
 namespace {
@@ -83,6 +84,25 @@ struct Trace {
 }
 
 void joint_memory_grant_contract() {
+    if (std::getenv("CX_EXPERIMENT_MEMORY_SCOPE")) {
+        Trace trace(false);
+        auto queue = std::make_shared<NetworkAnalytical::EventQueue>();
+        queue->schedule_event(1, [](void*) {}, nullptr);
+        Json cfg{{"memory_engine","in-process"}, {"host_budget_policy","cgroup-v2-whole-job-v1"},
+            {"open",{{"engine_budget",{{"events_per_call",3u}}}}},
+            {"limits",{{"pending_nodes","16"},{"descriptor_bytes","4096"},{"callbacks","32"},
+                       {"events","1"},{"same_time_events","12"},{"no_progress_events","12"},
+                       {"horizon_fs","2000000"},{"supply_frames","1"}}}};
+        Owner owner(queue, cfg, [&](const auto& op, const auto& body) { return trace.exchange(op, body); });
+        owner.advance();
+        require(trace.visits.size() == 3 && trace.authorizations.at(0).at("events_left") == "3",
+                "scoped memory grant did not use the native per-call budget");
+        owner.advance();
+        owner.advance();
+        require(trace.visits.size() == 4 && trace.authorizations.at(1).at("events_left") == "3",
+                "next grant failed after reaching the old cumulative limit");
+        owner.abort();
+    }
     for (const bool wake : {false, true}) {
         Trace trace(wake);
         auto queue = std::make_shared<NetworkAnalytical::EventQueue>();

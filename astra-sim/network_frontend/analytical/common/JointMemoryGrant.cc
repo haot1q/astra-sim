@@ -98,16 +98,18 @@ void JointSimulationCoordinator::advance_memory(const Candidates& candidates,
         }
     }
     exact = exact || first == horizon;
-    const auto same_limit = limit("same_time_events"), events_limit = limit("events");
+    const auto same_limit = limit("same_time_events");
     const auto same = first == frontier_fs_ ? same_time_ : 0;
-    if (events_ >= events_limit || same >= same_limit)
+    if (!admits_events(1) || same >= same_limit)
         throw std::runtime_error("joint event budget exhausted before memory grant");
     const auto before = business(status_);
     if (before < progress_) throw std::invalid_argument("joint business progress regressed");
+    const auto events_left = whole_job_ ? std::min(memory_events_per_call_, UINT64_MAX - events_) :
+        limit("events") - events_;
     const Json grant{{"schema","joint-memory-grant-v1"}, {"first_key",chosen},
         {"first_fs",std::to_string(first)}, {"frontier_fs",std::to_string(frontier_fs_)},
         {"cursor",first == frontier_fs_ ? tie_ : ""}, {"horizon_fs",std::to_string(horizon)},
-        {"exact",exact}, {"events_left",std::to_string(events_limit - events_)},
+        {"exact",exact}, {"events_left",std::to_string(events_left)},
         {"same_time_limit",std::to_string(same_limit)}, {"same_time_used",std::to_string(same)},
         {"idle_limit",std::to_string(limit("no_progress_events"))}, {"idle_used",std::to_string(idle_events_)},
         {"enforce_idle",!awaiting_}, {"progress_pending",before > progress_}};
@@ -119,7 +121,7 @@ void JointSimulationCoordinator::install_memory_grant(const Json& grant, const J
     const auto first = JointRuntimeClient::decimal(grant.at("first_fs"));
     const auto horizon = JointRuntimeClient::decimal(grant.at("horizon_fs"));
     const auto same = JointRuntimeClient::decimal(grant.at("same_time_used"));
-    const auto same_limit = limit("same_time_events"), events_limit = limit("events"), hard = limit("horizon_fs");
+    const auto same_limit = limit("same_time_events"), hard = limit("horizon_fs");
     const auto& chosen = grant.at("first_key");
     const bool exact = grant.at("exact");
     const auto& facts = reply.at("advanced");
@@ -135,7 +137,7 @@ void JointSimulationCoordinator::install_memory_grant(const Json& grant, const J
     static const std::set<std::string> reasons{"BOUNDARY","EXACT","NODE_COMPLETE","SUPPLY_WAKE",
         "UPPER_OUTPUT","CONTROL","LIFECYCLE","BUDGET","WAIT_INPUT"};
     const auto& wakes = reply.at("supply_wake");
-    if (!reasons.count(reason) || !wakes.is_array() || count > events_limit - events_ ||
+    if (!reasons.count(reason) || !wakes.is_array() || count > JointRuntimeClient::decimal(grant.at("events_left")) ||
         cut < frontier_fs_ || cut > horizon || (exact && count > 1) ||
         (reason == "EXACT" && (!exact || count != 1)) || (reason == "BOUNDARY" && cut != horizon) ||
         (reason == "SUPPLY_WAKE" && wakes.empty()) ||

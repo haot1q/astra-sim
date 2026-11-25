@@ -9,6 +9,7 @@ LICENSE file in the root directory of this source tree.
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -32,6 +33,14 @@ struct JointAccessLimits {
     uint64_t pending_graphs_per_rank = 2;
     uint64_t live_index_charge_bytes = 268435456;
     uint64_t live_pieces = 1048576;
+    bool whole_job = false;
+    bool admits_total(uint64_t actual, uint64_t historical_limit) const {
+        return whole_job || actual <= historical_limit;
+    }
+    std::optional<uint64_t> total_limit(uint64_t historical_limit) const {
+        return whole_job ? std::nullopt : std::optional<uint64_t>(historical_limit);
+    }
+
 };
 
 // One run owns admission charges; these are host limits, not simulated resources.

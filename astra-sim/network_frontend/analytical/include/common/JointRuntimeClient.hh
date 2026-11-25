@@ -4,6 +4,7 @@
 #include "extern/helper/json/json.hpp"
 #include <cstdint>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 #include <sys/types.h>
@@ -22,7 +23,7 @@ class JointRuntimeClient {
     void close();
     void stop_owned();
     const Json& config() const noexcept { return config_; }
-    static std::string original(const Json& ref, uint64_t cap, bool retain = false);
+    static std::string original(const Json& ref, std::optional<uint64_t> cap, bool retain = false);
     static uint64_t decimal(const Json& value);
   private:
     Json config_;
@@ -32,6 +33,7 @@ class JointRuntimeClient {
     uint64_t sequence_ = 0, calls_ = 0;
     size_t frame_limit_ = 0;
     int timeout_ms_ = 0;
+    bool whole_job_ = false;
     bool owned_ = false, terminal_ = false;
     std::string pending_;
     std::ofstream transcript_;
