@@ -76,6 +76,8 @@ class JointSimulationCoordinator : public AstraSim::ExternalMemoryService::Provi
     using Candidates = std::map<std::string, std::pair<uint64_t, Json>>;
     uint64_t mw_per_call_ = 0, memory_events_per_call_ = 0;
     bool whole_job_ = false;
+    bool supervised_progress_ = false;
+    bool enforce_node_idle_limit() const;
     bool admits_events(uint64_t count) const;
     std::optional<uint64_t> graph_file_limit() const;
     bool mw_retry_step_ = false;

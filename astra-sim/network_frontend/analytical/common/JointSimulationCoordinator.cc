@@ -4,6 +4,7 @@
 #include "astra-sim/system/Sys.hh"
 #include "astra-sim/system/memory/ServiceBindingJson.hh"
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <iostream>
 #include <stdexcept>
@@ -35,6 +36,12 @@ uint64_t JointSimulationCoordinator::limit(const char* name) const {
     const auto value = JointRuntimeClient::decimal(config_.at("limits").at(name));
     if (!value) throw std::invalid_argument("zero joint runtime budget");
     return value;
+}
+
+bool JointSimulationCoordinator::enforce_node_idle_limit() const {
+    // Supervised jobs report completed memory transactions to the host watchdog.
+    // A single business node can contain arbitrarily many such transactions.
+    return !awaiting_ && !supervised_progress_;
 }
 
 bool JointSimulationCoordinator::admits_events(uint64_t count) const {
@@ -238,6 +245,12 @@ void JointSimulationCoordinator::observe_progress(double timeout_seconds, JointP
         JointRuntimeClient::decimal(status_.at("admitted_nodes")))
         throw std::invalid_argument("progress observer must bind once before business");
     progress_observer_ = std::make_unique<JointProgress>(timeout_seconds, std::move(sink), std::move(clock));
+    if (whole_job_ && in_process_) {
+        if (const char* deadline = std::getenv("CX_EXPERIMENT_DEADLINE_NS")) {
+            const auto ns = JointRuntimeClient::decimal(Json(deadline));
+            supervised_progress_ = ns > 0 && ns <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        }
+    }
 }
 
 void JointSimulationCoordinator::consume(Json reply) {
@@ -405,7 +418,7 @@ void JointSimulationCoordinator::advance() {
         JointRuntimeClient::decimal(status_.at("admitted_nodes"));
     idle_events_ = progress == progress_ ? idle_events_ + 1 : 0;
     progress_ = progress;
-    if (!awaiting_ && idle_events_ > limit("no_progress_events")) throw std::runtime_error("joint no-business-progress budget exhausted");
+    if (enforce_node_idle_limit() && idle_events_ > limit("no_progress_events")) throw std::runtime_error("joint no-business-progress budget exhausted");
 }
 
 void JointSimulationCoordinator::finish() {

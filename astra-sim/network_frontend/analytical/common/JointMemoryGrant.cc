@@ -112,7 +112,7 @@ void JointSimulationCoordinator::advance_memory(const Candidates& candidates,
         {"exact",exact}, {"events_left",std::to_string(events_left)},
         {"same_time_limit",std::to_string(same_limit)}, {"same_time_used",std::to_string(same)},
         {"idle_limit",std::to_string(limit("no_progress_events"))}, {"idle_used",std::to_string(idle_events_)},
-        {"enforce_idle",!awaiting_}, {"progress_pending",before > progress_}};
+        {"enforce_idle",enforce_node_idle_limit()}, {"progress_pending",before > progress_}};
     call("advance_memory", grant, [&](const Json& reply) { install_memory_grant(grant, reply, before); });
     rethrow_failure();
 }
@@ -142,7 +142,7 @@ void JointSimulationCoordinator::install_memory_grant(const Json& grant, const J
         (reason == "EXACT" && (!exact || count != 1)) || (reason == "BOUNDARY" && cut != horizon) ||
         (reason == "SUPPLY_WAKE" && wakes.empty()) ||
         (reason == "NODE_COMPLETE" && reply.at("completions").empty()) ||
-        tail > same_limit || (!awaiting_ && idle > limit("no_progress_events")) || business(reply) < before)
+        tail > same_limit || (grant.at("enforce_idle").get<bool>() && idle > limit("no_progress_events")) || business(reply) < before)
         throw std::invalid_argument("invalid memory grant outcome");
     const auto after = business(reply);
     if (count && after == before) {
