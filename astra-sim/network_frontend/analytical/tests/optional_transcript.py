@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 SCHEMA = "simulator-joint-recording-selection-v1"
@@ -13,6 +14,8 @@ def echo():
     for line in sys.stdin:
         request = json.loads(line)
         command = request.pop("command")
+        if "--slow-activation" in sys.argv:
+            time.sleep(0.4)
         request["body"] = {"echo": command}
         print(json.dumps(request), flush=True)
         if command == "close":
@@ -51,11 +54,33 @@ def check(client, root, name, marker, sidecar, expected_logging, *, ipc_limit=4,
             ("open", "open"), ("close", "close")]
 
 
+def check_activation_time(client, root, *, supervised, remaining_ms, expect_ready):
+    case = root / f"activation-{supervised}-{remaining_ms}"
+    case.mkdir()
+    config = dict(version="joint-runtime-v1", run_id="r", session_id="s",
+                  output=str(case / "output"), activation={},
+                  worker_argv=[sys.executable, str(Path(__file__).resolve()), "--slow-activation"],
+                  limits=dict(frame_bytes="4096", host_timeout_ms="150", ipc_calls="5"))
+    if supervised:
+        config.update(host_budget_policy="cgroup-v2-whole-job-v1", memory_engine="in-process")
+    path = case / "config.json"
+    path.write_text(json.dumps(config))
+    env = dict(os.environ, CX_EXPERIMENT_DEADLINE_NS=str(time.monotonic_ns() + remaining_ms * 1_000_000))
+    # The client's cancellation FD must stay connected to a live host during the test.
+    with subprocess.Popen([client, str(path), "supervised-activation" if expect_ready else "limited-activation"],
+                          cwd=case, env=env, stdin=subprocess.PIPE) as process:
+        assert process.wait(timeout=8) == 0
+
+
 def run(client):
     def policy(positions):
         return json.dumps({"schema": SCHEMA, "positions": positions})
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        check_activation_time(client, root, supervised=False, remaining_ms=3000, expect_ready=False)
+        if os.getenv("CX_EXPERIMENT_MEMORY_SCOPE"):
+            check_activation_time(client, root, supervised=True, remaining_ms=3000, expect_ready=True)
+            check_activation_time(client, root, supervised=True, remaining_ms=100, expect_ready=False)
         check(client, root, "legacy-ipc", False, None, True, ipc_limit=1, scenario="legacy-ipc-limit")
         check(client, root, "unknown-budget", False, None, None, budget_policy="other")
         check(client, root, "split-budget", False, None, None,
@@ -73,7 +98,7 @@ def run(client):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--config":
+    if "--config" in sys.argv[1:]:
         echo()
     else:
         run(sys.argv[1])

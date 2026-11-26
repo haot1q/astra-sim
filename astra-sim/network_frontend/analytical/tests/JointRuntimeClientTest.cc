@@ -96,6 +96,15 @@ int main(int argc, char** argv) {
         require(prctl(PR_SET_CHILD_SUBREAPER, wanted) == 0, "test cannot set subreaper");
         if (file_budget_scenario(path, scenario)) {
             require(childless(), "file budget failure leaked a child");
+        } else if (scenario == "supervised-activation" || scenario == "limited-activation") {
+            Client client(path);
+            if (scenario == "supervised-activation") {
+                require(client.exchange("activate").at("echo") == "activate", "cold activation failed");
+                rejects_with([&] { client.exchange("status"); }, "runtime host IPC timeout");
+            } else {
+                rejects_with([&] { client.exchange("activate"); }, "runtime host IPC timeout");
+            }
+            client.stop_owned();
         } else if (scenario == "legacy-ipc-limit") {
             Client client(path);
             require(client.exchange("open").at("echo") == "open", "first permitted IPC failed");

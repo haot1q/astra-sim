@@ -45,7 +45,7 @@ class JointRuntimeClient {
     static std::vector<pid_t> children();
     void start(const std::string& path);
     void collect_stderr();
-    std::string transact(const std::string& frame);
+    std::string transact(const std::string& frame, bool first_activation);
     void cleanup();
 };
 }

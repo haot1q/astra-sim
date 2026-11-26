@@ -5,6 +5,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -252,9 +253,18 @@ void JointRuntimeClient::collect_stderr() {
     }
 }
 
-std::string JointRuntimeClient::transact(const std::string& frame) {
+std::string JointRuntimeClient::transact(const std::string& frame, bool first_activation) {
     using Clock = std::chrono::steady_clock;
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms_);
+    auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms_);
+    if (whole_job_ && first_activation) {
+        // The Linux supervisor owns a finite CLOCK_MONOTONIC deadline for cold preparation.
+        if (const char* end = std::getenv("CX_EXPERIMENT_DEADLINE_NS")) {
+            const auto ns = decimal(Json(end));
+            if (ns > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+                throw std::invalid_argument("invalid supervised first activation deadline");
+            deadline = Clock::time_point(std::chrono::nanoseconds(ns));
+        }
+    }
     size_t sent = 0;
     sigset_t blocked, previous;
     sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE);
@@ -311,7 +321,7 @@ JointRuntimeClient::Json JointRuntimeClient::exchange(const std::string& command
         {"command", command}, {"body", body}};
     const auto frame = request.dump() + "\n";
     if (frame.size() > frame_limit_) throw std::runtime_error("runtime command byte limit");
-    const auto reply = AstraSim::ServiceBindingJson::parse(transact(frame));
+    const auto reply = AstraSim::ServiceBindingJson::parse(transact(frame, command == "activate" && config_.contains("activation")));
     if (transcript_.is_open()) {
         const auto record = Json{{"command", request}, {"reply", reply}}.dump() + "\n";
         if (transcript_bytes_ > transcript_limit_ || record.size() > transcript_limit_ - transcript_bytes_) {
