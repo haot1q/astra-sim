@@ -91,16 +91,26 @@ void joint_memory_grant_contract() {
         Json cfg{{"memory_engine","in-process"}, {"host_budget_policy","cgroup-v2-whole-job-v1"},
             {"open",{{"engine_budget",{{"events_per_call",3u}}}}},
             {"limits",{{"pending_nodes","16"},{"descriptor_bytes","4096"},{"callbacks","32"},
-                       {"events","1"},{"same_time_events","12"},{"no_progress_events","12"},
+                       {"events","1"},{"same_time_events","12"},{"no_progress_events","1"},
                        {"horizon_fs","2000000"},{"supply_frames","1"}}}};
         Owner owner(queue, cfg, [&](const auto& op, const auto& body) { return trace.exchange(op, body); });
-        owner.advance();
-        require(trace.visits.size() == 3 && trace.authorizations.at(0).at("events_left") == "3",
-                "scoped memory grant did not use the native per-call budget");
-        owner.advance();
-        owner.advance();
-        require(trace.visits.size() == 4 && trace.authorizations.at(1).at("events_left") == "3",
-                "next grant failed after reaching the old cumulative limit");
+        owner.observe_progress(4, [](const auto&) {});
+        if (std::getenv("CX_EXPERIMENT_DEADLINE_NS")) {
+            owner.advance();
+            require(trace.visits.size() == 3 && trace.authorizations.at(0).at("events_left") == "3",
+                    "scoped memory grant did not use the native per-call budget");
+            require(trace.authorizations.at(0).at("enforce_idle") == false,
+                    "supervised progress was counted only at whole-node boundaries");
+            owner.advance();
+            owner.advance();
+            require(trace.visits.size() == 4 && trace.authorizations.at(1).at("events_left") == "3",
+                    "next grant failed after reaching the old cumulative limit");
+        } else {
+            bool rejected = false;
+            try { owner.advance(); } catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected && trace.authorizations.at(0).at("enforce_idle") == true,
+                    "unsupervised scoped grant lost its idle limit");
+        }
         owner.abort();
     }
     for (const bool wake : {false, true}) {
